@@ -9,10 +9,10 @@
 // Forward declare the top level function
 void group1_top(hls::stream<float> &in_stream, hls::stream<float> &out_stream);
 
-#define N_SAMPLES 100
+#define N_SAMPLES 500
 #define PI 3.14159265358979f
 
-int group1_main() {
+int main() {
     hls::stream<float> in_stream;
     hls::stream<float> out_stream;
 
