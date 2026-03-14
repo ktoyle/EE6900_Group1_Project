@@ -24,7 +24,7 @@
 //                  for gesture classification.
 //
 //                  The CNN architecture consists of 5 convolutional layers
-//                  followed by 4 dense layers, producing one of 52 possible
+//                  followed by 4 dense layers, producing one of 23 possible
 //                  hand gesture classifications from the NinaPro DB1 dataset.
 //                  Weights were pretrained in TensorFlow/Keras and exported
 //                  as binary files for hardcoded inference on the FPGA.
@@ -40,33 +40,20 @@
 //
 //=============================================================================
 
-
-
 #include <hls_math.h>
 #include "hls_stream.h"
-#include <iostream>
-#include <cmath>
 #include <ap_fixed.h>
+#include "cnn.h"
 
-//--------------------------------------------------------------------------
-// Type conversions for simulation and synthesis 
-// (Need to use ap_fixed instead of float for synthesis)
-//--------------------------------------------------------------------------
-#ifdef  CSIM_DEBUG
-    typedef float data_t;
-    typedef float acc_t;
-#else
-    typedef ap_fixed<16,4> data_t;
-    typedef ap_fixed<32, 8> acc_t;
-#endif
+
+
 
 //--------------------------------------------------------------------------
 // Helper Definitions
 //--------------------------------------------------------------------------
 
 #define N_TAPS 31 //size of filter coeffs array
-#define WINDOW_SIZE 52 // Size of buffer that holds data 
-#define N_CHANNELS  10 // number of channels in 1D-CNN
+
 
 //-------------------------------------------------------------------------
 // Global Variables
@@ -207,34 +194,96 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
 
 
 //-----------------------------------------------------------------------------
-// Top level function that gets synthesized
-// Reads one sample per channel, filters it, accumulates into buffer
-// When buffer is full: normalize, run CNN, reset buffer
+// group1_top — Top Level Function (synthesized to hardware)
+//
+// This is the entry point for the HLS design. It is called once per time step
+// (once per set of 10 new EMG samples, one per channel).
+//
+// Each call performs the following:
+//   1. Reads one new sample from each of the 10 input streams
+//   2. Passes each sample through the FIR filter chain (LPF -> HPF -> Notch)
+//   3. Stores the filtered sample in the EMG accumulation buffer
+//   4. Once the buffer holds WINDOW_SIZE (52) samples:
+//      a. Normalizes the buffer to [0,1] per channel
+//      b. Runs the full CNN forward pass
+//      c. Writes the predicted gesture class index to the output stream
+//      d. Resets the buffer counter for the next window
+//
+// Parameters:
+//   in_stream  — array of 10 input streams, one per EMG channel
+//   out_stream — output stream for predicted gesture class (integer 0-22)
+//   conv0-4_w  — pretrained conv layer weight arrays (loaded from .bin files)
+//   conv0-4_b  — pretrained conv layer bias arrays
+//   dense0-3_w — pretrained dense layer weight arrays
+//   dense0-3_b — pretrained dense layer bias arrays
 //-----------------------------------------------------------------------------
-void group1_top(hls::stream<float> in_stream[N_CHANNELS], hls::stream<int> &out_stream) {
+void group1_top(hls::stream<float> in_stream[N_CHANNELS],
+                hls::stream<int>   &out_stream,
+                float conv0_w[], float conv0_b[],
+                float conv1_w[], float conv1_b[],
+                float conv2_w[], float conv2_b[],
+                float conv3_w[], float conv3_b[],
+                float conv4_w[], float conv4_b[],
+                float dense0_w[], float dense0_b[],
+                float dense1_w[], float dense1_b[],
+                float dense2_w[], float dense2_b[],
+                float dense3_w[], float dense3_b[]) {
 
-         // Read and filter one sample per channel
-        for (int ch = 0; ch < N_CHANNELS; ch++) {
-            data_t raw        = static_cast<data_t>(in_stream[ch].read());
-            data_t lpf_data   = fir_lpf(raw, ch);
-            data_t band_data  = fir_hpf(lpf_data, ch);
-            data_t notch_data = fir_notch(band_data, ch);
-            emg_buffer[buffer_count][ch] = notch_data;
-        }
+     //-------------------------------------------------------------------------
+    // Stage 1: Read, filter, and accumulate one sample per channel
+    // Each channel is processed independently through the full FIR chain
+    //-------------------------------------------------------------------------
+    for (int ch = 0; ch < N_CHANNELS; ch++) {
 
-         buffer_count++;
+        // Read raw sample from this channel's input stream
+        data_t raw = static_cast<data_t>(in_stream[ch].read());
 
-    // Once buffer is full — normalize, run CNN, reset
-    if (buffer_count == WINDOW_SIZE) {
-        normalize_buffer(emg_buffer);
-        // TODO: int gesture = cnn_forward(emg_buffer);
-        // TODO: out_stream.write(gesture);
+        // Apply FIR filter chain:
+        // LPF removes high frequency noise above 500Hz
+        data_t lpf_data   = fir_lpf(raw, ch);
 
-        out_stream.write(0); //dummy for testing
-        buffer_count = 0;
+        // HPF removes low frequency drift below 20Hz
+        // Combined with LPF this creates a 20Hz-500Hz bandpass
+        data_t band_data  = fir_hpf(lpf_data, ch);
+
+        // Notch removes 60Hz US power line interference
+        data_t notch_data = fir_notch(band_data, ch);
+
+        // Store fully filtered sample in the accumulation buffer
+        // buffer_count tracks the current time step position (0 to 51)
+        emg_buffer[buffer_count][ch] = notch_data;
     }
 
-        // Write result to output stream
-        //out_stream.write(static_cast<float>(filtered_data));
-    
+    // Advance to the next time step position in the buffer
+    buffer_count++;
+
+
+    //-------------------------------------------------------------------------
+    // Stage 2: Once buffer is full, run CNN and output prediction
+    // This fires every WINDOW_SIZE (52) calls to group1_top
+    //-------------------------------------------------------------------------
+    if (buffer_count == WINDOW_SIZE) {
+
+        // Normalize buffer values to [0,1] per channel
+        // This makes the CNN input scale-invariant across subjects
+        normalize_buffer(emg_buffer);
+
+         // Run the full CNN forward pass and get predicted gesture class
+        int gesture = cnn_forward(emg_buffer,
+                                  conv0_w, conv0_b,
+                                  conv1_w, conv1_b,
+                                  conv2_w, conv2_b,
+                                  conv3_w, conv3_b,
+                                  conv4_w, conv4_b,
+                                  dense0_w, dense0_b,
+                                  dense1_w, dense1_b,
+                                  dense2_w, dense2_b,
+                                  dense3_w, dense3_b);
+
+        // Write the predicted gesture index to the output stream                         
+        out_stream.write(gesture);
+        
+        // Reset buffer counter — next 52 samples will fill a new window
+        buffer_count = 0;
+    }
 }

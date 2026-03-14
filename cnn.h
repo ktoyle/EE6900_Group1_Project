@@ -1,0 +1,66 @@
+//=============================================================================
+// File:        cnn.h
+// Description: Header for 1D-CNN forward pass
+//=============================================================================
+#ifndef CNN_H
+#define CNN_H
+
+#include <ap_fixed.h>
+
+
+//--------------------------------------------------------------------------
+// Type conversions for simulation and synthesis 
+// (Need to use ap_fixed instead of float for synthesis)
+//--------------------------------------------------------------------------
+
+#ifdef CSIM_DEBUG
+    typedef float data_t;
+    typedef float acc_t;
+#else
+    typedef ap_fixed<16,4> data_t;
+    typedef ap_fixed<32,8> acc_t;
+#endif
+
+#define WINDOW_SIZE  52
+#define N_CHANNELS   10
+#define N_CLASSES    23
+
+// Conv layer dimensions
+#define C0_IN   10
+#define C0_OUT  128
+#define C1_IN   128
+#define C1_OUT  64
+#define C2_IN   64
+#define C2_OUT  32
+#define C3_IN   32
+#define C3_OUT  16
+#define C4_IN   16
+#define C4_OUT  8
+#define KERNEL  3
+
+// Dense layer dimensions
+#define D0_IN   8
+#define D0_OUT  512
+#define D1_IN   512
+#define D1_OUT  256
+#define D2_IN   256
+#define D2_OUT  128
+#define D3_IN   128
+#define D3_OUT  23
+
+int cnn_forward(
+    data_t input[WINDOW_SIZE][N_CHANNELS],
+    // Conv weights
+    float conv0_w[KERNEL * C0_IN * C0_OUT], float conv0_b[C0_OUT],
+    float conv1_w[KERNEL * C1_IN * C1_OUT], float conv1_b[C1_OUT],
+    float conv2_w[KERNEL * C2_IN * C2_OUT], float conv2_b[C2_OUT],
+    float conv3_w[KERNEL * C3_IN * C3_OUT], float conv3_b[C3_OUT],
+    float conv4_w[KERNEL * C4_IN * C4_OUT], float conv4_b[C4_OUT],
+    // Dense weights
+    float dense0_w[D0_IN * D0_OUT], float dense0_b[D0_OUT],
+    float dense1_w[D1_IN * D1_OUT], float dense1_b[D1_OUT],
+    float dense2_w[D2_IN * D2_OUT], float dense2_b[D2_OUT],
+    float dense3_w[D3_IN * D3_OUT], float dense3_b[D3_OUT]
+);
+
+#endif
