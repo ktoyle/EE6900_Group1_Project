@@ -67,15 +67,22 @@ void conv1d_layer(
 ) {
     // Iterate over each output time step
     for (int t = 0; t < in_time; t++) {
-
+        
         // Iterate over each output filter (feature map)
+        // PIPELINE: allow a new filter computation to start every cycle
+        // This parallelizes filter computations across time steps
         for (int f = 0; f < out_ch; f++) {
+
+            #pragma HLS PIPELINE II = 1
 
             // Initialize accumulator with bias for this filter
             acc_t acc = (acc_t)bias[f];
 
             // Slide the kernel across the time dimension
+             // UNROLL: compute all kernel positions simultaneously
             for (int k = 0; k < kernel_size; k++) {
+
+                 #pragma HLS UNROLL
 
                 // Compute the corresponding input time index with same padding
                 // kernel_size/2 centers the kernel on the current output time step
@@ -85,7 +92,11 @@ void conv1d_layer(
                 if (t_in >= 0 && t_in < in_time) {
 
                     // Dot product across all input channels at this time step
+                     // UNROLL: compute all channel MACs simultaneously
                     for (int c = 0; c < in_ch; c++) {
+
+                         #pragma HLS UNROLL factor = 8
+
                         // input is stored as [time][channel] flattened to 1D
                         // kernel is stored as [k][in_ch][out_ch] flattened to 1D
                         acc += (acc_t)input[t_in * in_ch + c] *
@@ -124,6 +135,10 @@ void maxpool1d_layer(
 
     for (int t = 0; t < out_time; t++) {
         for (int c = 0; c < ch; c++) {
+
+            // PIPELINE: process one channel per cycle across all time steps
+             #pragma HLS PIPELINE II=1
+
             // Take the two consecutive time steps for this pool window
             data_t a = input[(t*2)   * ch + c];  // even time step
             data_t b = input[(t*2+1) * ch + c];  // odd time step
@@ -159,13 +174,16 @@ void dense_layer(
     bool apply_relu
 ) {
     // Iterate over each output neuron
+    // PIPELINE: start a new output neuron computation every cycle    
     for (int o = 0; o < out_size; o++) {
-
+         #pragma HLS PIPELINE II = 1
         // Initialize accumulator with this neuron's bias
         acc_t acc = (acc_t)bias[o];
 
         // Dot product of input vector with this neuron's weight row
+        // UNROLL: compute all input MACs simultaneously
         for (int i = 0; i < in_size; i++) {
+            #pragma HLS UNROLL factor = 8
             acc += (acc_t)input[i] * (acc_t)weights[i * out_size + o];
         }
 
@@ -192,8 +210,10 @@ void dense_layer(
 int argmax(data_t input[], int size) {
     int best_idx    = 0;
     data_t best_val = input[0];  // assume first element is best initially
-
+    
+    // PIPELINE: find maximum in a pipelined fashion
     for (int i = 1; i < size; i++) {
+        #pragma HLS PIPELINE II=1
         if (input[i] > best_val) {
             best_val = input[i];  // update best value
             best_idx = i;         // update best index
@@ -242,14 +262,19 @@ int cnn_forward(
     float dense2_w[], float dense2_b[],
     float dense3_w[], float dense3_b[]
 ) {
+
     //-------------------------------------------------------------------------
     // Flatten 2D input (WINDOW_SIZE x N_CHANNELS) into 1D array
     // Conv1d_layer expects a flat array indexed as [time * n_channels + channel]
     //-------------------------------------------------------------------------
     data_t flat[WINDOW_SIZE * N_CHANNELS];
-    for (int t = 0; t < WINDOW_SIZE; t++)
-        for (int c = 0; c < N_CHANNELS; c++)
+    #pragma HLS ARRAY_PARTITION variable=flat cyclic factor=10
+
+    for (int t = 0; t < WINDOW_SIZE; t++){
+        for (int c = 0; c < N_CHANNELS; c++){
             flat[t * N_CHANNELS + c] = input[t][c];
+        }
+    }
 
     //-------------------------------------------------------------------------
     // Conv block 1
@@ -259,6 +284,9 @@ int cnn_forward(
     //-------------------------------------------------------------------------
     data_t c0[WINDOW_SIZE * C0_OUT];  // conv output buffer
     data_t p0[26 * C0_OUT];           // pool output buffer
+    #pragma HLS ARRAY_PARTITION variable=c0 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=p0 cyclic factor=8
+
     conv1d_layer(flat, WINDOW_SIZE, C0_IN, c0, C0_OUT, conv0_w, KERNEL, conv0_b);
     maxpool1d_layer(c0, WINDOW_SIZE, p0, C0_OUT);
 
@@ -270,6 +298,9 @@ int cnn_forward(
     //-------------------------------------------------------------------------
     data_t c1[26 * C1_OUT];
     data_t p1[13 * C1_OUT];
+    #pragma HLS ARRAY_PARTITION variable=c1 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=p1 cyclic factor=8
+
     conv1d_layer(p0, 26, C1_IN, c1, C1_OUT, conv1_w, KERNEL, conv1_b);
     maxpool1d_layer(c1, 26, p1, C1_OUT);
 
@@ -281,6 +312,9 @@ int cnn_forward(
     //-------------------------------------------------------------------------
     data_t c2[13 * C2_OUT];
     data_t p2[6 * C2_OUT];
+    #pragma HLS ARRAY_PARTITION variable=c2 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=p2 cyclic factor=8
+
     conv1d_layer(p1, 13, C2_IN, c2, C2_OUT, conv2_w, KERNEL, conv2_b);
     maxpool1d_layer(c2, 13, p2, C2_OUT);
 
@@ -292,6 +326,9 @@ int cnn_forward(
     //-------------------------------------------------------------------------
     data_t c3[6 * C3_OUT];
     data_t p3[3 * C3_OUT];
+    #pragma HLS ARRAY_PARTITION variable=c3 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=p3 cyclic factor=8
+
     conv1d_layer(p2, 6, C3_IN, c3, C3_OUT, conv3_w, KERNEL, conv3_b);
     maxpool1d_layer(c3, 6, p3, C3_OUT);
 
@@ -303,6 +340,9 @@ int cnn_forward(
     //-------------------------------------------------------------------------
     data_t c4[3 * C4_OUT];
     data_t p4[1 * C4_OUT];
+    #pragma HLS ARRAY_PARTITION variable=c4 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=p4 complete  // only 8 elements, fully partition
+
     conv1d_layer(p3, 3, C4_IN, c4, C4_OUT, conv4_w, KERNEL, conv4_b);
     maxpool1d_layer(c4, 3, p4, C4_OUT);
 
@@ -315,6 +355,11 @@ int cnn_forward(
     // Dense 3: 128 → 23   (one logit per gesture class, no ReLU)
     //-------------------------------------------------------------------------
     data_t d0[D0_OUT], d1[D1_OUT], d2[D2_OUT], d3[D3_OUT];
+
+    #pragma HLS ARRAY_PARTITION variable=d0 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=d1 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=d2 cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=d3 complete  // only 23 elements, fully partition
 
     dense_layer(p4, D0_IN, d0, D0_OUT, dense0_w, dense0_b, true);   // ReLU
     dense_layer(d0, D1_IN, d1, D1_OUT, dense1_w, dense1_b, true);   // ReLU

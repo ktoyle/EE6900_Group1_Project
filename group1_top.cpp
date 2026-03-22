@@ -54,7 +54,6 @@
 
 #define N_TAPS 31 //size of filter coeffs array
 
-
 //-------------------------------------------------------------------------
 // Global Variables
 //-------------------------------------------------------------------------
@@ -115,15 +114,29 @@ const data_t notch_coeffs[N_TAPS] = {
 // Processes 1 sample and a single channel at time, maintains history via static shift register
 //----------------------------------------------------------------------------
 data_t fir_lpf(data_t input, int ch) {
+
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
-    for (int i = N_TAPS - 1; i > 0; i--)
+    // partition by channel
+    #pragma HLS ARRAY_PARTITION variable=shift_reg complete dim=1 
+    // partial on taps 
+    #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
+
+    // PIPELINE: shift all taps in parallel each cycle
+    for (int i = N_TAPS - 1; i > 0; i--){
+        #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
+    }
+
     shift_reg[ch][0] = input;
 
     acc_t acc = 0;
-    for (int i = 0; i < N_TAPS; i++)
+
+    // UNROLL: compute all 31 MACs simultaneously
+    for (int i = 0; i < N_TAPS; i++){
+        #pragma HLS UNROLL
         acc += shift_reg[ch][i] * lpf_coeffs[i];
+    }
 
     return (data_t)acc;
 }
@@ -136,13 +149,25 @@ data_t fir_lpf(data_t input, int ch) {
 data_t fir_hpf(data_t input, int ch) {
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
-    for (int i = N_TAPS - 1; i > 0; i--)
+    // partition by channel
+    #pragma HLS ARRAY_PARTITION variable=shift_reg complete dim=1 
+    // partial on taps 
+    #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
+
+    for (int i = N_TAPS - 1; i > 0; i--){
+        #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
+    }
+
     shift_reg[ch][0] = input;
 
     acc_t acc = 0;
-    for (int i = 0; i < N_TAPS; i++)
+
+    // UNROLL: compute all 31 MACs simultaneously
+    for (int i = 0; i < N_TAPS; i++){
+        #pragma HLS UNROLL
         acc += shift_reg[ch][i] * hpf_coeffs[i];
+    }
 
     return (data_t)acc;
 }
@@ -154,13 +179,23 @@ data_t fir_hpf(data_t input, int ch) {
 data_t fir_notch(data_t input, int ch) {
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
-    for (int i = N_TAPS - 1; i > 0; i--)
+    // partition by channel
+    #pragma HLS ARRAY_PARTITION variable=shift_reg complete dim=1 
+    // partial on taps 
+    #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
+
+    for (int i = N_TAPS - 1; i > 0; i--){
+        #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
+    }
+
     shift_reg[ch][0] = input;
 
     acc_t acc = 0;
-    for (int i = 0; i < N_TAPS; i++)
+    for (int i = 0; i < N_TAPS; i++){
+        #pragma HLS UNROLL
         acc += shift_reg[ch][i] * notch_coeffs[i];
+    }
 
     return (data_t)acc;
 }
@@ -175,14 +210,21 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
         data_t ch_min = buffer[0][ch];
         data_t ch_max = buffer[0][ch];
 
+
+         // Find the true min and max across all time steps for this channel
+        // PIPELINE: find min/max one sample per cycle
         for (int t = 1; t < WINDOW_SIZE; t++) {
+
+            #pragma HLS PIPELINE II=1
             if (buffer[t][ch] < ch_min) ch_min = buffer[t][ch];
             if (buffer[t][ch] > ch_max) ch_max = buffer[t][ch];
         }
 
         // Normalize
+         // PIPELINE: normalize one sample per cycle
         data_t range = ch_max - ch_min;
         for (int t = 0; t < WINDOW_SIZE; t++) {
+            #pragma HLS PIPELINE II=1
             if (range > (data_t)0.0001) {  // avoid divide by zero
                 buffer[t][ch] = (buffer[t][ch] - ch_min) / range;
             } else {
@@ -229,11 +271,44 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 float dense2_w[], float dense2_b[],
                 float dense3_w[], float dense3_b[]) {
 
-     //-------------------------------------------------------------------------
+
+
+
+    //-------------------------------------------------------------------------
+    // HLS Interface Pragmas
+    //-------------------------------------------------------------------------
+    #pragma HLS INTERFACE axis      port=in_stream
+    #pragma HLS INTERFACE axis      port=out_stream
+    #pragma HLS INTERFACE m_axi depth=3840   port=conv0_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=128    port=conv0_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=24576  port=conv1_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=64     port=conv1_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=6144   port=conv2_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=32     port=conv2_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=1536   port=conv3_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=16     port=conv3_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=384    port=conv4_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=8      port=conv4_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=4096   port=dense0_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=512    port=dense0_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=131072 port=dense1_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=256    port=dense1_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=32768  port=dense2_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=128    port=dense2_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
+    #pragma HLS INTERFACE s_axilite port=return
+
+    // Partition emg_buffer along channel dimension
+    #pragma HLS ARRAY_PARTITION variable=emg_buffer complete dim=2 
+
+    //-------------------------------------------------------------------------
     // Stage 1: Read, filter, and accumulate one sample per channel
     // Each channel is processed independently through the full FIR chain
+    //PIPELINE: process one channel per cycle
     //-------------------------------------------------------------------------
     for (int ch = 0; ch < N_CHANNELS; ch++) {
+        #pragma HLS PIPELINE II=1
 
         // Read raw sample from this channel's input stream
         data_t raw = static_cast<data_t>(in_stream[ch].read());
