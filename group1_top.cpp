@@ -277,27 +277,27 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     //-------------------------------------------------------------------------
     // HLS Interface Pragmas
     //-------------------------------------------------------------------------
-    #pragma HLS INTERFACE axis      port=in_stream
-    #pragma HLS INTERFACE axis      port=out_stream
-    #pragma HLS INTERFACE m_axi depth=3840   port=conv0_w  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=128    port=conv0_b  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=24576  port=conv1_w  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=64     port=conv1_b  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=6144   port=conv2_w  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=32     port=conv2_b  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=1536   port=conv3_w  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=16     port=conv3_b  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=384    port=conv4_w  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=8      port=conv4_b  bundle=weights
-    #pragma HLS INTERFACE m_axi depth=4096   port=dense0_w bundle=weights
-    #pragma HLS INTERFACE m_axi depth=512    port=dense0_b bundle=weights
-    #pragma HLS INTERFACE m_axi depth=131072 port=dense1_w bundle=weights
-    #pragma HLS INTERFACE m_axi depth=256    port=dense1_b bundle=weights
-    #pragma HLS INTERFACE m_axi depth=32768  port=dense2_w bundle=weights
-    #pragma HLS INTERFACE m_axi depth=128    port=dense2_b bundle=weights
-    #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
-    #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
-    #pragma HLS INTERFACE s_axilite port=return
+    // #pragma HLS INTERFACE axis      port=in_stream
+    // #pragma HLS INTERFACE axis      port=out_stream
+    // #pragma HLS INTERFACE m_axi depth=3840   port=conv0_w  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=128    port=conv0_b  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=24576  port=conv1_w  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=64     port=conv1_b  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=6144   port=conv2_w  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=32     port=conv2_b  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=1536   port=conv3_w  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=16     port=conv3_b  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=384    port=conv4_w  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=8      port=conv4_b  bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=4096   port=dense0_w bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=512    port=dense0_b bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=131072 port=dense1_w bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=256    port=dense1_b bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=32768  port=dense2_w bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=128    port=dense2_b bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
+    // #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
+    //#pragma HLS INTERFACE s_axilite port=return
 
     // Partition emg_buffer along channel dimension
     #pragma HLS ARRAY_PARTITION variable=emg_buffer complete dim=2 
