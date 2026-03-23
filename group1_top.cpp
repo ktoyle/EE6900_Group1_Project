@@ -261,15 +261,15 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
 //-----------------------------------------------------------------------------
 void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 hls::stream<int>   &out_stream,
-                float conv0_w[], float conv0_b[],
-                float conv1_w[], float conv1_b[],
-                float conv2_w[], float conv2_b[],
-                float conv3_w[], float conv3_b[],
-                float conv4_w[], float conv4_b[],
-                float dense0_w[], float dense0_b[],
-                float dense1_w[], float dense1_b[],
-                float dense2_w[], float dense2_b[],
-                float dense3_w[], float dense3_b[]) {
+                weight_t conv0_w[], weight_t conv0_b[],
+                weight_t conv1_w[], weight_t conv1_b[],
+                weight_t conv2_w[], weight_t conv2_b[],
+                weight_t conv3_w[], weight_t conv3_b[],
+                weight_t conv4_w[], weight_t conv4_b[],
+                weight_t dense0_w[], weight_t dense0_b[],
+                weight_t dense1_w[], weight_t dense1_b[],
+                weight_t dense2_w[], weight_t dense2_b[],
+                weight_t dense3_w[], weight_t dense3_b[]) {
 
 
 

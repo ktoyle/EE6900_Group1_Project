@@ -62,8 +62,8 @@ static inline data_t relu(data_t x) {
 void conv1d_layer(
     data_t input[], int in_time, int in_ch,
     data_t output[], int out_ch,
-    float kernel[], int kernel_size,
-    float bias[]
+    weight_t kernel[], int kernel_size,
+    weight_t bias[]
 ) {
     // Iterate over each output time step
     for (int t = 0; t < in_time; t++) {
@@ -170,7 +170,7 @@ void maxpool1d_layer(
 void dense_layer(
     data_t input[], int in_size,
     data_t output[], int out_size,
-    float weights[], float bias[],
+    weight_t weights[], weight_t bias[],
     bool apply_relu
 ) {
     // Iterate over each output neuron
@@ -252,15 +252,15 @@ int argmax(data_t input[], int size) {
 //-----------------------------------------------------------------------------
 int cnn_forward(
     data_t input[WINDOW_SIZE][N_CHANNELS],
-    float conv0_w[], float conv0_b[],
-    float conv1_w[], float conv1_b[],
-    float conv2_w[], float conv2_b[],
-    float conv3_w[], float conv3_b[],
-    float conv4_w[], float conv4_b[],
-    float dense0_w[], float dense0_b[],
-    float dense1_w[], float dense1_b[],
-    float dense2_w[], float dense2_b[],
-    float dense3_w[], float dense3_b[]
+    weight_t conv0_w[], weight_t conv0_b[],
+    weight_t conv1_w[], weight_t conv1_b[],
+    weight_t conv2_w[], weight_t conv2_b[],
+    weight_t conv3_w[], weight_t conv3_b[],
+    weight_t conv4_w[], weight_t conv4_b[],
+    weight_t dense0_w[], weight_t dense0_b[],
+    weight_t dense1_w[], weight_t dense1_b[],
+    weight_t dense2_w[], weight_t dense2_b[],
+    weight_t dense3_w[], weight_t dense3_b[]
 ) {
 
     //-------------------------------------------------------------------------

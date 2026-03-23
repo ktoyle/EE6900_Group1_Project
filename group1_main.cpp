@@ -53,15 +53,15 @@
 //--------------------------------------------------------------------------
 void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 hls::stream<int>   &out_stream,
-                float conv0_w[], float conv0_b[],
-                float conv1_w[], float conv1_b[],
-                float conv2_w[], float conv2_b[],
-                float conv3_w[], float conv3_b[],
-                float conv4_w[], float conv4_b[],
-                float dense0_w[], float dense0_b[],
-                float dense1_w[], float dense1_b[],
-                float dense2_w[], float dense2_b[],
-                float dense3_w[], float dense3_b[]);
+                weight_t conv0_w[], weight_t conv0_b[],
+                weight_t conv1_w[], weight_t conv1_b[],
+                weight_t conv2_w[], weight_t conv2_b[],
+                weight_t conv3_w[], weight_t conv3_b[],
+                weight_t conv4_w[], weight_t conv4_b[],
+                weight_t dense0_w[], weight_t dense0_b[],
+                weight_t dense1_w[], weight_t dense1_b[],
+                weight_t dense2_w[], weight_t dense2_b[],
+                weight_t dense3_w[], weight_t dense3_b[]);
 
 //--------------------------------------------------------------------------
 // CNN Weight Arrays
@@ -70,15 +70,15 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
 //   Dense layers: (in_size x out_size) flattened
 // All weights are float32 to match the .bin file format
 //--------------------------------------------------------------------------
-float conv0_w[3*10*128],  conv0_b[128];
-float conv1_w[3*128*64],  conv1_b[64];
-float conv2_w[3*64*32],   conv2_b[32];
-float conv3_w[3*32*16],   conv3_b[16];
-float conv4_w[3*16*8],    conv4_b[8];
-float dense0_w[8*512],    dense0_b[512];
-float dense1_w[512*256],  dense1_b[256];
-float dense2_w[256*128],  dense2_b[128];
-float dense3_w[128*23],   dense3_b[23];
+weight_t conv0_w[3*10*128],  conv0_b[128];
+weight_t conv1_w[3*128*64],  conv1_b[64];
+weight_t conv2_w[3*64*32],   conv2_b[32];
+weight_t conv3_w[3*32*16],   conv3_b[16];
+weight_t conv4_w[3*16*8],    conv4_b[8];
+weight_t dense0_w[8*512],    dense0_b[512];
+weight_t dense1_w[512*256],  dense1_b[256];
+weight_t dense2_w[256*128],  dense2_b[128];
+weight_t dense3_w[128*23],   dense3_b[23];
 
 //-----------------------------------------------------------------------------
 // load_weights
@@ -92,7 +92,7 @@ float dense3_w[128*23],   dense3_b[23];
 //   buf  — destination float array to load weights into
 //   n    — number of float values to read
 //-----------------------------------------------------------------------------
-void load_weights(const char* path, float* buf, int n) {
+void load_weights(const char* path, weight_t* buf, int n) {
     std::ifstream f(path, std::ios::binary);
     f.read((char*)buf, n * sizeof(float));
     f.close();

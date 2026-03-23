@@ -16,9 +16,11 @@
 #ifdef CSIM_DEBUG
     typedef float data_t;
     typedef float acc_t;
+    typedef float weight_t;
 #else
     typedef ap_fixed<16,4> data_t;
     typedef ap_fixed<32,8> acc_t;
+    typedef ap_fixed<32,10> weight_t;
 #endif
 
 #define WINDOW_SIZE  52
@@ -51,16 +53,16 @@
 int cnn_forward(
     data_t input[WINDOW_SIZE][N_CHANNELS],
     // Conv weights
-    float conv0_w[KERNEL * C0_IN * C0_OUT], float conv0_b[C0_OUT],
-    float conv1_w[KERNEL * C1_IN * C1_OUT], float conv1_b[C1_OUT],
-    float conv2_w[KERNEL * C2_IN * C2_OUT], float conv2_b[C2_OUT],
-    float conv3_w[KERNEL * C3_IN * C3_OUT], float conv3_b[C3_OUT],
-    float conv4_w[KERNEL * C4_IN * C4_OUT], float conv4_b[C4_OUT],
+    weight_t conv0_w[KERNEL * C0_IN * C0_OUT], weight_t conv0_b[C0_OUT],
+    weight_t conv1_w[KERNEL * C1_IN * C1_OUT], weight_t conv1_b[C1_OUT],
+    weight_t conv2_w[KERNEL * C2_IN * C2_OUT], weight_t conv2_b[C2_OUT],
+    weight_t conv3_w[KERNEL * C3_IN * C3_OUT], weight_t conv3_b[C3_OUT],
+    weight_t conv4_w[KERNEL * C4_IN * C4_OUT], weight_t conv4_b[C4_OUT],
     // Dense weights
-    float dense0_w[D0_IN * D0_OUT], float dense0_b[D0_OUT],
-    float dense1_w[D1_IN * D1_OUT], float dense1_b[D1_OUT],
-    float dense2_w[D2_IN * D2_OUT], float dense2_b[D2_OUT],
-    float dense3_w[D3_IN * D3_OUT], float dense3_b[D3_OUT]
+    weight_t dense0_w[D0_IN * D0_OUT], weight_t dense0_b[D0_OUT],
+    weight_t dense1_w[D1_IN * D1_OUT], weight_t dense1_b[D1_OUT],
+    weight_t dense2_w[D2_IN * D2_OUT], weight_t dense2_b[D2_OUT],
+    weight_t dense3_w[D3_IN * D3_OUT], weight_t dense3_b[D3_OUT]
 );
 
 #endif
