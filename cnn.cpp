@@ -148,7 +148,49 @@ void maxpool1d_layer(
         }
     }
 }
+//-----------------------------------------------------------------------------
 
+// AveragePooling1d_Layer
+//
+//
+// Performs 1D max pooling with pool size 2 and stride 2.
+// Takes the maximum of every two consecutive time steps, halving the time
+// dimension. This reduces computation and increases receptive field in
+// subsequent layers.
+//
+// Parameters:
+//   input   — flattened input array of shape (in_time x ch)
+//   in_time — number of time steps in the input (must be even)
+//   output  — flattened output array of shape (in_time/2 x ch)
+//   ch      — number of channels (same for input and output)
+//   stride  - stride length
+//   poolsize - pooling window size
+//-----------------------------------------------------------------------------
+void averagepool1d_layer(
+    data_t input[], int in_time,
+    data_t output[], int ch,
+    int32_t stride, int32_t poolsize
+)  {
+    // Output time dimension is (input size/ pool size)
+    int out_time = in_time / poolsize;
+
+    for (int t = 0; t < out_time; t++) {
+        for (int c = 0; c < ch; c++) {
+
+            // PIPELINE: process one channel per cycle across all time steps
+             #pragma HLS PIPELINE II=1
+            data_t a=0;
+            // Take the k time steps per pool window
+            for (uint32_t stridestep=0; stridestep < stride; stridestep++){
+                #pragma HLS UNROLL
+                a += input[(t*stride+stridestep)   * ch + c];  //
+            }
+
+            // Store the maximum of the two values
+            output[t * ch + c] = a/stride;
+        }
+    }
+}
 //-----------------------------------------------------------------------------
 // dense_layer
 //
