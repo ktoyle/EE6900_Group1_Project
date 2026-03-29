@@ -45,9 +45,6 @@
 #include <ap_fixed.h>
 #include "cnn.h"
 
-
-
-
 //--------------------------------------------------------------------------
 // Helper Definitions
 //--------------------------------------------------------------------------
@@ -115,6 +112,8 @@ const data_t notch_coeffs[N_TAPS] = {
 //----------------------------------------------------------------------------
 data_t fir_lpf(data_t input, int ch) {
 
+    #pragma HLS INLINE
+
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
     // partition by channel
@@ -123,6 +122,7 @@ data_t fir_lpf(data_t input, int ch) {
     #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
 
     // PIPELINE: shift all taps in parallel each cycle
+    LPF_SHIFT:
     for (int i = N_TAPS - 1; i > 0; i--){
         #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
@@ -133,6 +133,7 @@ data_t fir_lpf(data_t input, int ch) {
     acc_t acc = 0;
 
     // UNROLL: compute all 31 MACs simultaneously
+    LPF_ACC:
     for (int i = 0; i < N_TAPS; i++){
         #pragma HLS UNROLL
         acc += shift_reg[ch][i] * lpf_coeffs[i];
@@ -147,6 +148,7 @@ data_t fir_lpf(data_t input, int ch) {
 // Processes 1 sample and a single channel at time, maintains history via static shift register
 //----------------------------------------------------------------------------
 data_t fir_hpf(data_t input, int ch) {
+    #pragma HLS INLINE
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
     // partition by channel
@@ -154,6 +156,7 @@ data_t fir_hpf(data_t input, int ch) {
     // partial on taps 
     #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
 
+    HPF_SHIFT:
     for (int i = N_TAPS - 1; i > 0; i--){
         #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
@@ -164,6 +167,7 @@ data_t fir_hpf(data_t input, int ch) {
     acc_t acc = 0;
 
     // UNROLL: compute all 31 MACs simultaneously
+    HPF_ACC:
     for (int i = 0; i < N_TAPS; i++){
         #pragma HLS UNROLL
         acc += shift_reg[ch][i] * hpf_coeffs[i];
@@ -177,6 +181,9 @@ data_t fir_hpf(data_t input, int ch) {
 // Processes 1 sample and a single channel at time, maintains history via static shift register
 //----------------------------------------------------------------------------
 data_t fir_notch(data_t input, int ch) {
+
+    #pragma HLS INLINE
+
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
 
     // partition by channel
@@ -184,6 +191,7 @@ data_t fir_notch(data_t input, int ch) {
     // partial on taps 
     #pragma HLS ARRAY_PARTITION variable=shift_reg cyclic factor=8 dim=2  
 
+    NOTCH_SHIFT:
     for (int i = N_TAPS - 1; i > 0; i--){
         #pragma HLS PIPELINE II=1
         shift_reg[ch][i] = shift_reg[ch][i-1];
@@ -192,6 +200,8 @@ data_t fir_notch(data_t input, int ch) {
     shift_reg[ch][0] = input;
 
     acc_t acc = 0;
+
+    NOTCH_ACC:
     for (int i = 0; i < N_TAPS; i++){
         #pragma HLS UNROLL
         acc += shift_reg[ch][i] * notch_coeffs[i];
@@ -205,6 +215,11 @@ data_t fir_notch(data_t input, int ch) {
 // Buffer gets reset after going through model
 //--------------------------------------------------------------------------
 void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
+
+    #pragma HLS INLINE
+    #pragma HLS ARRAY_PARTITION variable=buffer dim=1 complete
+
+    NORM_MAX_MIN:
     for (int ch = 0; ch < N_CHANNELS; ch++) {
         // Find min and max for this channel across the window
         data_t ch_min = buffer[0][ch];
@@ -213,6 +228,7 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
 
          // Find the true min and max across all time steps for this channel
         // PIPELINE: find min/max one sample per cycle
+        NORM_TRUE_MAX_MIN:
         for (int t = 1; t < WINDOW_SIZE; t++) {
 
             #pragma HLS PIPELINE II=1
@@ -223,6 +239,8 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
         // Normalize
          // PIPELINE: normalize one sample per cycle
         data_t range = ch_max - ch_min;
+
+        NORM_CALC:
         for (int t = 0; t < WINDOW_SIZE; t++) {
             #pragma HLS PIPELINE II=1
             if (range > (data_t)0.0001) {  // avoid divide by zero
@@ -307,7 +325,9 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     // Each channel is processed independently through the full FIR chain
     //PIPELINE: process one channel per cycle
     //-------------------------------------------------------------------------
+    TOP_LOOP:
     for (int ch = 0; ch < N_CHANNELS; ch++) {
+
         #pragma HLS PIPELINE II=1
 
         // Read raw sample from this channel's input stream

@@ -65,21 +65,27 @@ void conv1d_layer(
     weight_t kernel[], int kernel_size,
     weight_t bias[]
 ) {
+
     // Iterate over each output time step
+
+    CONV1D_LAYER:
     for (int t = 0; t < in_time; t++) {
         
         // Iterate over each output filter (feature map)
         // PIPELINE: allow a new filter computation to start every cycle
         // This parallelizes filter computations across time steps
+
+        CONV1D_FILTER:
         for (int f = 0; f < out_ch; f++) {
 
-            #pragma HLS PIPELINE II = 1
+            #pragma HLS PIPELINE II = 4
 
             // Initialize accumulator with bias for this filter
             acc_t acc = (acc_t)bias[f];
 
             // Slide the kernel across the time dimension
              // UNROLL: compute all kernel positions simultaneously
+            SLIDE_KERNEL:
             for (int k = 0; k < kernel_size; k++) {
 
                  #pragma HLS UNROLL
@@ -92,10 +98,11 @@ void conv1d_layer(
                 if (t_in >= 0 && t_in < in_time) {
 
                     // Dot product across all input channels at this time step
-                     // UNROLL: compute all channel MACs simultaneously
+                    // UNROLL: compute all channel MACs simultaneously
+                    KERNEL_DOT_PRODUCT:
                     for (int c = 0; c < in_ch; c++) {
 
-                         #pragma HLS UNROLL factor = 8
+                         #pragma HLS UNROLL factor = 4
 
                         // input is stored as [time][channel] flattened to 1D
                         // kernel is stored as [k][in_ch][out_ch] flattened to 1D
@@ -133,7 +140,9 @@ void maxpool1d_layer(
     // Output time dimension is half the input
     int out_time = in_time / 2;
 
+    MAXPOOL:
     for (int t = 0; t < out_time; t++) {
+        MAXPOOL_CALC:
         for (int c = 0; c < ch; c++) {
 
             // PIPELINE: process one channel per cycle across all time steps
@@ -173,15 +182,24 @@ void dense_layer(
     weight_t weights[], weight_t bias[],
     bool apply_relu
 ) {
+
+    
+
     // Iterate over each output neuron
     // PIPELINE: start a new output neuron computation every cycle    
+    DENSE_LAYER:
     for (int o = 0; o < out_size; o++) {
          #pragma HLS PIPELINE II = 1
+         
         // Initialize accumulator with this neuron's bias
         acc_t acc = (acc_t)bias[o];
 
+        //#pragma HLS ALLOCATION operation instances=mul limit=6//limit DSP multipliers 
+        #pragma HLS BIND_OP variable=acc op=mul impl=dsp //explicity use DSP blocks instead of LUT
+
         // Dot product of input vector with this neuron's weight row
         // UNROLL: compute all input MACs simultaneously
+        DENSE_DOT_PRODUCT:
         for (int i = 0; i < in_size; i++) {
             #pragma HLS UNROLL factor = 8
             acc += (acc_t)input[i] * (acc_t)weights[i * out_size + o];
@@ -212,6 +230,7 @@ int argmax(data_t input[], int size) {
     data_t best_val = input[0];  // assume first element is best initially
     
     // PIPELINE: find maximum in a pipelined fashion
+    ARG_MAX:
     for (int i = 1; i < size; i++) {
         #pragma HLS PIPELINE II=1
         if (input[i] > best_val) {
@@ -270,6 +289,7 @@ int cnn_forward(
     data_t flat[WINDOW_SIZE * N_CHANNELS];
     #pragma HLS ARRAY_PARTITION variable=flat cyclic factor=10
 
+    FLATTEN_INPUT:
     for (int t = 0; t < WINDOW_SIZE; t++){
         for (int c = 0; c < N_CHANNELS; c++){
             flat[t * N_CHANNELS + c] = input[t][c];
