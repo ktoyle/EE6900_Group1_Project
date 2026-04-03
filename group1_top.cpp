@@ -23,11 +23,8 @@
 //                  passed through a 1D Convolutional Neural Network (1D-CNN)
 //                  for gesture classification.
 //
-//                  The CNN architecture consists of 5 convolutional layers
-//                  followed by 4 dense layers, producing one of 23 possible
-//                  hand gesture classifications from the NinaPro DB1 dataset.
-//                  Weights were pretrained in TensorFlow/Keras and exported
-//                  as binary files for hardcoded inference on the FPGA.
+//                  CNN weights are loaded from DRAM in small tiles during
+//                  inference to fit within the xc7z020's BRAM capacity.
 //
 // Target:      Xilinx PYZQ-Z2 xc7z020clg400-1
 // Tool:        Vitis HLS 2024.1
@@ -104,18 +101,6 @@ const data_t notch_coeffs[N_TAPS] = {
     0.0050, 0.0025, 0.0006, -0.0004, -0.0009,
     -0.0013
 };
-
-//-------------------------------------------------------------------------
-// Helper function to load weights from DRAM to BRAM
-//-------------------------------------------------------------------------
-
-void load_weights(weight_t* dst, weight_t* src, int n) {
-    LOAD_WEIGHTS:
-    for (int i = 0; i < n; i++) {
-        #pragma HLS PIPELINE II =1
-        dst[i] = src[i];
-    }
-}
 
 
 //----------------------------------------------------------------------------
@@ -221,6 +206,7 @@ data_t fir_notch(data_t input, int ch) {
 
     return (data_t)acc;
 }
+
 //---------------------------------------------------------------------------
 // Normalize emg_buffer between 0 and 1
 // Min and Max are based on 52 data entries currently in the buffer
@@ -229,7 +215,6 @@ data_t fir_notch(data_t input, int ch) {
 void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
 
     #pragma HLS INLINE
-    #pragma HLS ARRAY_PARTITION variable=buffer dim=1 complete
 
     NORM_MAX_MIN:
     for (int ch = 0; ch < N_CHANNELS; ch++) {
@@ -237,28 +222,23 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
         data_t ch_min = buffer[0][ch];
         data_t ch_max = buffer[0][ch];
 
-
-         // Find the true min and max across all time steps for this channel
-        // PIPELINE: find min/max one sample per cycle
         NORM_TRUE_MAX_MIN:
         for (int t = 1; t < WINDOW_SIZE; t++) {
-
             #pragma HLS PIPELINE II=1
             if (buffer[t][ch] < ch_min) ch_min = buffer[t][ch];
             if (buffer[t][ch] > ch_max) ch_max = buffer[t][ch];
         }
 
         // Normalize
-         // PIPELINE: normalize one sample per cycle
         data_t range = ch_max - ch_min;
 
         NORM_CALC:
         for (int t = 0; t < WINDOW_SIZE; t++) {
             #pragma HLS PIPELINE II=1
-            if (range > (data_t)0.0001) {  // avoid divide by zero
+            if (range > (data_t)0.0001) {
                 buffer[t][ch] = (buffer[t][ch] - ch_min) / range;
             } else {
-                buffer[t][ch] = (data_t)0;  // flat signal → all zeros
+                buffer[t][ch] = (data_t)0;
             }
         }
     }
@@ -268,26 +248,9 @@ void normalize_buffer(data_t buffer[WINDOW_SIZE][N_CHANNELS]) {
 //-----------------------------------------------------------------------------
 // group1_top — Top Level Function (synthesized to hardware)
 //
-// This is the entry point for the HLS design. It is called once per time step
-// (once per set of 10 new EMG samples, one per channel).
-//
-// Each call performs the following:
-//   1. Reads one new sample from each of the 10 input streams
-//   2. Passes each sample through the FIR filter chain (LPF -> HPF -> Notch)
-//   3. Stores the filtered sample in the EMG accumulation buffer
-//   4. Once the buffer holds WINDOW_SIZE (52) samples:
-//      a. Normalizes the buffer to [0,1] per channel
-//      b. Runs the full CNN forward pass
-//      c. Writes the predicted gesture class index to the output stream
-//      d. Resets the buffer counter for the next window
-//
-// Parameters:
-//   in_stream  — array of 10 input streams, one per EMG channel
-//   out_stream — output stream for predicted gesture class (integer 0-22)
-//   conv0-4_w  — pretrained conv layer weight arrays (loaded from .bin files)
-//   conv0-4_b  — pretrained conv layer bias arrays
-//   dense0-3_w — pretrained dense layer weight arrays
-//   dense0-3_b — pretrained dense layer bias arrays
+// Weight arrays are passed directly to cnn_forward as DRAM pointers.
+// cnn_forward internally tiles the weight loading into small BRAM buffers,
+// so no bulk weight buffering is needed here.
 //-----------------------------------------------------------------------------
 void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 hls::stream<int>   &out_stream,
@@ -300,9 +263,6 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 weight_t dense1_w[], weight_t dense1_b[],
                 weight_t dense2_w[], weight_t dense2_b[],
                 weight_t dense3_w[], weight_t dense3_b[]) {
-
-
-
 
     //-------------------------------------------------------------------------
     // HLS Interface Pragmas
@@ -329,89 +289,40 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
     #pragma HLS INTERFACE s_axilite port=return
 
-
-    //---------------------------------------------------------------------
-    // Load Interface from DRAM to BRAM
-    //---------------------------------------------------------------------
-
-    weight_t conv0_w_buf[3840], conv0_b_buf[128];
-    weight_t conv1_w_buf[24576], conv1_b_buf[64];
-    weight_t conv2_w_buf[6144], conv2_b_buf[32];
-    weight_t conv3_w_buf[1536], conv3_b_buf[16];
-    weight_t conv4_w_buf[384], conv4_b_buf[8];
-    weight_t dense0_w_buf[4096], dense0_b_buf[512];
-    weight_t dense1_w_buf[131072], dense1_b_buf[256];
-    weight_t dense2_w_buf[32768], dense2_b_buf[128];
-    weight_t dense3_w_buf[2944], dense3_b_buf[23];
-
-    load_weights(conv0_w_buf, conv0_w, 3840);
-    load_weights(conv0_b_buf, conv0_b, 128);
-    load_weights(conv1_w_buf, conv1_w, 24576);
-    load_weights(conv1_b_buf, conv1_b, 64);
-    load_weights(conv2_w_buf, conv2_w, 6144);
-    load_weights(conv2_b_buf, conv2_b, 32);
-    load_weights(conv3_w_buf, conv3_w, 1536);
-    load_weights(conv3_b_buf, conv3_b, 16);
-    load_weights(conv4_w_buf, conv4_w, 384);
-    load_weights(conv4_b_buf, conv4_b, 8);
-    load_weights(dense0_w_buf, dense0_w, 4096);
-    load_weights(dense0_b_buf, dense0_b, 512);
-    load_weights(dense1_w_buf, dense1_w, 131072);
-    load_weights(dense1_b_buf, dense1_b, 256);
-    load_weights(dense2_w_buf, dense2_w, 32768);
-    load_weights(dense2_b_buf, dense2_b, 128);
-    load_weights(dense3_w_buf, dense3_w, 2944);
-    load_weights(dense3_b_buf, dense3_b, 23);
-
-
-
     // Partition emg_buffer along channel dimension
     #pragma HLS ARRAY_PARTITION variable=emg_buffer complete dim=2 
 
     //-------------------------------------------------------------------------
     // Stage 1: Read, filter, and accumulate one sample per channel
-    // Each channel is processed independently through the full FIR chain
-    //PIPELINE: process one channel per cycle
     //-------------------------------------------------------------------------
     TOP_LOOP:
     for (int ch = 0; ch < N_CHANNELS; ch++) {
-
         #pragma HLS PIPELINE II=2
 
         // Read raw sample from this channel's input stream
         data_t raw = static_cast<data_t>(in_stream[ch].read());
 
-        // Apply FIR filter chain:
-        // LPF removes high frequency noise above 500Hz
+        // Apply FIR filter chain: LPF → HPF → Notch
         data_t lpf_data   = fir_lpf(raw, ch);
-
-        // HPF removes low frequency drift below 20Hz
-        // Combined with LPF this creates a 20Hz-500Hz bandpass
         data_t band_data  = fir_hpf(lpf_data, ch);
-
-        // Notch removes 60Hz US power line interference
         data_t notch_data = fir_notch(band_data, ch);
 
-        // Store fully filtered sample in the accumulation buffer
-        // buffer_count tracks the current time step position (0 to 51)
+        // Store filtered sample in accumulation buffer
         emg_buffer[buffer_count][ch] = notch_data;
     }
 
-    // Advance to the next time step position in the buffer
+    // Advance to the next time step
     buffer_count++;
-
 
     //-------------------------------------------------------------------------
     // Stage 2: Once buffer is full, run CNN and output prediction
-    // This fires every WINDOW_SIZE (52) calls to group1_top
     //-------------------------------------------------------------------------
     if (buffer_count == WINDOW_SIZE) {
 
         // Normalize buffer values to [0,1] per channel
-        // This makes the CNN input scale-invariant across subjects
         normalize_buffer(emg_buffer);
 
-         // Run the full CNN forward pass and get predicted gesture class
+        // Run the full CNN forward pass — weights are tiled internally
         int gesture = cnn_forward(emg_buffer,
                                   conv0_w, conv0_b,
                                   conv1_w, conv1_b,
@@ -426,7 +337,7 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
         // Write the predicted gesture index to the output stream                         
         out_stream.write(gesture);
         
-        // Reset buffer counter — next 52 samples will fill a new window
+        // Reset buffer counter
         buffer_count = 0;
     }
 }

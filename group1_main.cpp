@@ -42,7 +42,7 @@
 //            produces 9 complete 52-sample windows (500 / 52 = 9)
 //--------------------------------------------------------------------------
 
-#define N_SAMPLES   500
+#define N_SAMPLES   52
 #define PI          3.14159265358979f
 #define N_CHANNELS  10
 
