@@ -66,6 +66,8 @@ void conv1d_layer(
     weight_t bias[]
 ) {
 
+    #pragma HLS INLINE
+
     // Iterate over each output time step
 
     CONV1D_LAYER:
@@ -137,6 +139,8 @@ void maxpool1d_layer(
     data_t input[], int in_time,
     data_t output[], int ch
 ) {
+
+    #pragma HLS INLINE
     // Output time dimension is half the input
     int out_time = in_time / 2;
 
@@ -183,7 +187,7 @@ void dense_layer(
     bool apply_relu
 ) {
 
-    
+    #pragma HLS INLINE
 
     // Iterate over each output neuron
     // PIPELINE: start a new output neuron computation every cycle    
@@ -226,6 +230,8 @@ void dense_layer(
 //   index of the maximum value (predicted gesture class)
 //-----------------------------------------------------------------------------
 int argmax(data_t input[], int size) {
+
+    #pragma HLS INLINE
     int best_idx    = 0;
     data_t best_val = input[0];  // assume first element is best initially
     

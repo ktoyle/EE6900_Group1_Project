@@ -105,6 +105,18 @@ const data_t notch_coeffs[N_TAPS] = {
     -0.0013
 };
 
+//-------------------------------------------------------------------------
+// Helper function to load weights from DRAM to BRAM
+//-------------------------------------------------------------------------
+
+void load_weights(weight_t* dst, weight_t* src, int n) {
+    LOAD_WEIGHTS:
+    for (int i = 0; i < n; i++) {
+        #pragma HLS PIPELINE II =1
+        dst[i] = src[i];
+    }
+}
+
 
 //----------------------------------------------------------------------------
 // FIR Low Pass Filter — one shift register per channel per filter
@@ -295,27 +307,63 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     //-------------------------------------------------------------------------
     // HLS Interface Pragmas
     //-------------------------------------------------------------------------
-    // #pragma HLS INTERFACE axis      port=in_stream
-    // #pragma HLS INTERFACE axis      port=out_stream
-    // #pragma HLS INTERFACE m_axi depth=3840   port=conv0_w  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=128    port=conv0_b  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=24576  port=conv1_w  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=64     port=conv1_b  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=6144   port=conv2_w  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=32     port=conv2_b  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=1536   port=conv3_w  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=16     port=conv3_b  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=384    port=conv4_w  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=8      port=conv4_b  bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=4096   port=dense0_w bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=512    port=dense0_b bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=131072 port=dense1_w bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=256    port=dense1_b bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=32768  port=dense2_w bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=128    port=dense2_b bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
-    // #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
-    //#pragma HLS INTERFACE s_axilite port=return
+    #pragma HLS INTERFACE axis      port=in_stream
+    #pragma HLS INTERFACE axis      port=out_stream
+    #pragma HLS INTERFACE m_axi depth=3840   port=conv0_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=128    port=conv0_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=24576  port=conv1_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=64     port=conv1_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=6144   port=conv2_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=32     port=conv2_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=1536   port=conv3_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=16     port=conv3_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=384    port=conv4_w  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=8      port=conv4_b  bundle=weights
+    #pragma HLS INTERFACE m_axi depth=4096   port=dense0_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=512    port=dense0_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=131072 port=dense1_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=256    port=dense1_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=32768  port=dense2_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=128    port=dense2_b bundle=weights
+    #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
+    #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
+    #pragma HLS INTERFACE s_axilite port=return
+
+
+    //---------------------------------------------------------------------
+    // Load Interface from DRAM to BRAM
+    //---------------------------------------------------------------------
+
+    weight_t conv0_w_buf[3840], conv0_b_buf[128];
+    weight_t conv1_w_buf[24576], conv1_b_buf[64];
+    weight_t conv2_w_buf[6144], conv2_b_buf[32];
+    weight_t conv3_w_buf[1536], conv3_b_buf[16];
+    weight_t conv4_w_buf[384], conv4_b_buf[8];
+    weight_t dense0_w_buf[4096], dense0_b_buf[512];
+    weight_t dense1_w_buf[131072], dense1_b_buf[256];
+    weight_t dense2_w_buf[32768], dense2_b_buf[128];
+    weight_t dense3_w_buf[2944], dense3_b_buf[23];
+
+    load_weights(conv0_w_buf, conv0_w, 3840);
+    load_weights(conv0_b_buf, conv0_b, 128);
+    load_weights(conv1_w_buf, conv1_w, 24576);
+    load_weights(conv1_b_buf, conv1_b, 64);
+    load_weights(conv2_w_buf, conv2_w, 6144);
+    load_weights(conv2_b_buf, conv2_b, 32);
+    load_weights(conv3_w_buf, conv3_w, 1536);
+    load_weights(conv3_b_buf, conv3_b, 16);
+    load_weights(conv4_w_buf, conv4_w, 384);
+    load_weights(conv4_b_buf, conv4_b, 8);
+    load_weights(dense0_w_buf, dense0_w, 4096);
+    load_weights(dense0_b_buf, dense0_b, 512);
+    load_weights(dense1_w_buf, dense1_w, 131072);
+    load_weights(dense1_b_buf, dense1_b, 256);
+    load_weights(dense2_w_buf, dense2_w, 32768);
+    load_weights(dense2_b_buf, dense2_b, 128);
+    load_weights(dense3_w_buf, dense3_w, 2944);
+    load_weights(dense3_b_buf, dense3_b, 23);
+
+
 
     // Partition emg_buffer along channel dimension
     #pragma HLS ARRAY_PARTITION variable=emg_buffer complete dim=2 
@@ -328,7 +376,7 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     TOP_LOOP:
     for (int ch = 0; ch < N_CHANNELS; ch++) {
 
-        #pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=2
 
         // Read raw sample from this channel's input stream
         data_t raw = static_cast<data_t>(in_stream[ch].read());
