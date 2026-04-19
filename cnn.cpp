@@ -1,18 +1,384 @@
+// //=============================================================================
+// // Project:     EE6900 FPGA Accelerator Design - Group 1 (fully optimized)
+// // File:        cnn.cpp
+// // Description: 1D Convolutional Neural Network (1D-CNN) forward pass for
+// //              real-time EMG hand gesture classification.
+// //
+// //              Tiled implementation: weights are loaded from DRAM into
+// //              small reusable BRAM buffers in tiles to fit within the
+// //              xc7z020's limited BRAM capacity.
+// //
+// //              Architecture (matches pretrained Keras model):
+// //                - 5x Conv1D layers with ReLU activation
+// //                - 5x MaxPool1D layers (pool size 2, stride 2)
+// //                - 4x Dense (fully connected) layers
+// //                - Final argmax to select predicted gesture class
+// //
+// //              Input:  Normalized EMG window of shape (52, 10)
+// //              Output: Integer gesture class index (0 to 22)
+// //=============================================================================
+
+
+// #include "cnn.h"
+
+// //-----------------------------------------------------------------------------
+// // Tile sizes for weight buffering
+// //
+// // CONV_TILE: number of output filters processed per tile in conv layers
+// //   Largest conv weight tile: KERNEL * C1_IN * CONV_TILE = 3*128*8 = 3072
+// //   At 32 bits each = 12 KB per tile — fits easily in BRAM
+// //
+// // DENSE_TILE: number of output neurons processed per tile in dense layers
+// //   Largest dense weight tile: D1_IN * DENSE_TILE = 512*32 = 16384
+// //   At 32 bits each = 64 KB per tile — fits in BRAM
+// //-----------------------------------------------------------------------------
+// #define CONV_TILE   8
+// #define DENSE_TILE  32
+
+// //-----------------------------------------------------------------------------
+// // relu
+// //-----------------------------------------------------------------------------
+// static inline data_t relu(data_t x) {
+//     return x > (data_t)0 ? x : (data_t)0;
+// }
+
+// //-----------------------------------------------------------------------------
+// // conv1d_layer_tiled
+// //
+// // Tiled 1D convolution: processes CONV_TILE output filters at a time.
+// // For each tile, loads weights from DRAM into a local BRAM buffer,
+// // computes the convolution for those filters, and writes final results
+// // (with ReLU) directly to the output activation buffer.
+// //
+// // Parameters:
+// //   input       — flattened input activations [in_time x in_ch] (BRAM)
+// //   in_time     — number of time steps
+// //   in_ch       — number of input channels
+// //   output      — flattened output activations [in_time x out_ch] (BRAM)
+// //   out_ch      — total number of output filters
+// //   kernel      — full weight array [kernel_size x in_ch x out_ch] (DRAM)
+// //   kernel_size — convolution kernel size
+// //   bias        — bias array [out_ch] (DRAM)
+// //-----------------------------------------------------------------------------
+// void conv1d_layer_tiled(
+//     data_t input[], int in_time, int in_ch,
+//     data_t output[], int out_ch,
+//     weight_t kernel[], int kernel_size,
+//     weight_t bias[]
+// ) {
+//     #pragma HLS INLINE off
+
+//     // Local BRAM buffers for one tile of weights
+//     // Sized for the largest conv layer: 3 * 128 * CONV_TILE = 3072
+//     weight_t w_buf[KERNEL * C1_IN * CONV_TILE];
+//     weight_t b_buf[CONV_TILE];
+
+//     // Iterate over output filter groups
+//     CONV_TILE_LOOP:
+//     for (int fg = 0; fg < out_ch; fg += CONV_TILE) {
+
+//         // Determine how many filters in this tile
+//         int tile_size = (fg + CONV_TILE <= out_ch) ? CONV_TILE : (out_ch - fg);
+
+//         //---------------------------------------------------------------------
+//         // Load weight tile from DRAM into BRAM
+//         // Remap from full kernel layout [k][in_ch][out_ch]
+//         // to tile layout [k][in_ch][CONV_TILE]
+//         //---------------------------------------------------------------------
+//         LOAD_CONV_W:
+//         for (int k = 0; k < kernel_size; k++) {
+//             for (int c = 0; c < in_ch; c++) {
+//                 for (int f = 0; f < tile_size; f++) {
+//                     #pragma HLS PIPELINE
+//                     w_buf[k * in_ch * CONV_TILE + c * CONV_TILE + f] =
+//                         kernel[k * in_ch * out_ch + c * out_ch + fg + f];
+//                 }
+//             }
+//         }
+
+//         // Load bias tile
+//         LOAD_CONV_B:
+//         for (int f = 0; f < tile_size; f++) {
+//             #pragma HLS PIPELINE
+//             b_buf[f] = bias[fg + f];
+//         }
+
+//         //---------------------------------------------------------------------
+//         // Compute convolution for this tile of filters
+//         //---------------------------------------------------------------------
+//         CONV_TIME:
+//         for (int t = 0; t < in_time; t++) {
+//             CONV_FILTER:
+//             for (int f = 0; f < tile_size; f++) {
+//                 #pragma HLS PIPELINE
+
+//                 acc_t acc = (acc_t)b_buf[f];
+
+//                 CONV_KERNEL:
+//                 for (int k = 0; k < kernel_size; k++) {
+//                     int t_in = t + k - kernel_size / 2;
+
+//                     if (t_in >= 0 && t_in < in_time) {
+//                         CONV_CHANNEL:
+//                         for (int c = 0; c < in_ch; c++) {
+//                             acc += (acc_t)input[t_in * in_ch + c] *
+//                                    (acc_t)w_buf[k * in_ch * CONV_TILE + c * CONV_TILE + f];
+//                         }
+//                     }
+//                 }
+
+//                 // Write final result with ReLU directly to output
+//                 output[t * out_ch + fg + f] = relu((data_t)acc);
+//             }
+//         }
+//     }
+// }
+
+// //-----------------------------------------------------------------------------
+// // maxpool1d_layer
+// //
+// // 1D max pooling with pool size 2 and stride 2.
+// //-----------------------------------------------------------------------------
+// void maxpool1d_layer(
+//     data_t input[], int in_time,
+//     data_t output[], int ch
+// ) {
+//     #pragma HLS INLINE off
+
+//     int out_time = in_time / 2;
+
+//     MAXPOOL:
+//     for (int t = 0; t < out_time; t++) {
+//         MAXPOOL_CALC:
+//         for (int c = 0; c < ch; c++) {
+//             #pragma HLS PIPELINE
+
+//             data_t a = input[(t*2)   * ch + c];
+//             data_t b = input[(t*2+1) * ch + c];
+
+//             output[t * ch + c] = (a > b) ? a : b;
+//         }
+//     }
+// }
+
+// //-----------------------------------------------------------------------------
+// // dense_layer_tiled
+// //
+// // Tiled dense layer: processes DENSE_TILE output neurons at a time.
+// // For each tile, loads weights from DRAM into a local BRAM buffer,
+// // computes the full dot product for those neurons, applies ReLU if
+// // requested, and writes final results to the output array.
+// //
+// // Parameters:
+// //   input      — input activations [in_size] (BRAM)
+// //   in_size    — number of input neurons
+// //   output     — output activations [out_size] (BRAM)
+// //   out_size   — total number of output neurons
+// //   weights    — full weight matrix [in_size x out_size] (DRAM)
+// //   bias       — bias array [out_size] (DRAM)
+// //   apply_relu — apply ReLU activation after linear transform
+// //-----------------------------------------------------------------------------
+// void dense_layer_tiled(
+//     data_t input[], int in_size,
+//     data_t output[], int out_size,
+//     weight_t weights[], weight_t bias[],
+//     bool apply_relu
+// ) {
+//     #pragma HLS INLINE off
+
+//     // Local BRAM buffers for one tile of weights
+//     // Sized for the largest dense layer: D1_IN * DENSE_TILE = 512*32 = 16384
+//     weight_t w_buf[D1_IN * DENSE_TILE];
+//     weight_t b_buf[DENSE_TILE];
+
+//     // Iterate over output neuron groups
+//     DENSE_TILE_LOOP:
+//     for (int og = 0; og < out_size; og += DENSE_TILE) {
+
+//         // Determine how many neurons in this tile
+//         int tile_size = (og + DENSE_TILE <= out_size) ? DENSE_TILE : (out_size - og);
+
+//         //---------------------------------------------------------------------
+//         // Load weight tile from DRAM into BRAM
+//         // Remap from [in_size x out_size] to [in_size x DENSE_TILE]
+//         //---------------------------------------------------------------------
+//         LOAD_DENSE_W:
+//         for (int i = 0; i < in_size; i++) {
+//             for (int o = 0; o < tile_size; o++) {
+//                 #pragma HLS PIPELINE
+//                 w_buf[i * DENSE_TILE + o] = weights[i * out_size + og + o];
+//             }
+//         }
+
+//         // Load bias tile
+//         LOAD_DENSE_B:
+//         for (int o = 0; o < tile_size; o++) {
+//             #pragma HLS PIPELINE
+//             b_buf[o] = bias[og + o];
+//         }
+
+//         //---------------------------------------------------------------------
+//         // Compute dot product for this tile of output neurons
+//         //---------------------------------------------------------------------
+//         DENSE_COMPUTE:
+//         for (int o = 0; o < tile_size; o++) {
+//             #pragma HLS PIPELINE
+
+//             acc_t acc = (acc_t)b_buf[o];
+
+//             DENSE_DOT:
+//             for (int i = 0; i < in_size; i++) {
+//                 acc += (acc_t)input[i] * (acc_t)w_buf[i * DENSE_TILE + o];
+//             }
+
+//             // Write final result to correct position in output
+//             output[og + o] = apply_relu ? relu((data_t)acc) : (data_t)acc;
+//         }
+//     }
+// }
+
+// //-----------------------------------------------------------------------------
+// // argmax
+// //-----------------------------------------------------------------------------
+// int argmax(data_t input[], int size) {
+//     #pragma HLS INLINE off
+
+//     int best_idx    = 0;
+//     data_t best_val = input[0];
+
+//     ARG_MAX:
+//     for (int i = 1; i < size; i++) {
+//         #pragma HLS PIPELINE
+//         if (input[i] > best_val) {
+//             best_val = input[i];
+//             best_idx = i;
+//         }
+//     }
+//     return best_idx;
+// }
+
+// //-----------------------------------------------------------------------------
+// // cnn_forward
+// //
+// // Full 1D-CNN forward pass using tiled weight loading.
+// // Weights are loaded from DRAM in small tiles — no need to buffer
+// // all weights in BRAM simultaneously.
+// //
+// // Activation buffers between layers remain fully on-chip in BRAM.
+// //
+// // Data flow:
+// //   Input (52,10) → flatten → 520
+// //   Conv0+Pool0: (52,10)  → (52,128)  → (26,128)
+// //   Conv1+Pool1: (26,128) → (26,64)   → (13,64)
+// //   Conv2+Pool2: (13,64)  → (13,32)   → (6,32)
+// //   Conv3+Pool3: (6,32)   → (6,16)    → (3,16)
+// //   Conv4+Pool4: (3,16)   → (3,8)     → (1,8)
+// //   Dense0: 8   → 512
+// //   Dense1: 512 → 256
+// //   Dense2: 256 → 128
+// //   Dense3: 128 → 23
+// //   Argmax: 23  → 1
+// //-----------------------------------------------------------------------------
+// int cnn_forward(
+//     data_t input[WINDOW_SIZE][N_CHANNELS],
+//     weight_t conv0_w[], weight_t conv0_b[],
+//     weight_t conv1_w[], weight_t conv1_b[],
+//     weight_t conv2_w[], weight_t conv2_b[],
+//     weight_t conv3_w[], weight_t conv3_b[],
+//     weight_t conv4_w[], weight_t conv4_b[],
+//     weight_t dense0_w[], weight_t dense0_b[],
+//     weight_t dense1_w[], weight_t dense1_b[],
+//     weight_t dense2_w[], weight_t dense2_b[],
+//     weight_t dense3_w[], weight_t dense3_b[]
+// ) {
+
+//     //-------------------------------------------------------------------------
+//     // Flatten 2D input into 1D
+//     //-------------------------------------------------------------------------
+//     data_t flat[WINDOW_SIZE * N_CHANNELS];
+
+//     FLATTEN_INPUT:
+//     for (int t = 0; t < WINDOW_SIZE; t++) {
+//         for (int c = 0; c < N_CHANNELS; c++) {
+//             #pragma HLS PIPELINE
+//             flat[t * N_CHANNELS + c] = input[t][c];
+//         }
+//     }
+
+//     //-------------------------------------------------------------------------
+//     // Conv block 0: (52,10) → conv → (52,128) → pool → (26,128)
+//     //-------------------------------------------------------------------------
+//     data_t c0[WINDOW_SIZE * C0_OUT];
+//     data_t p0[26 * C0_OUT];
+
+//     conv1d_layer_tiled(flat, WINDOW_SIZE, C0_IN, c0, C0_OUT, conv0_w, KERNEL, conv0_b);
+//     maxpool1d_layer(c0, WINDOW_SIZE, p0, C0_OUT);
+
+//     //-------------------------------------------------------------------------
+//     // Conv block 1: (26,128) → conv → (26,64) → pool → (13,64)
+//     //-------------------------------------------------------------------------
+//     data_t c1[26 * C1_OUT];
+//     data_t p1[13 * C1_OUT];
+
+//     conv1d_layer_tiled(p0, 26, C1_IN, c1, C1_OUT, conv1_w, KERNEL, conv1_b);
+//     maxpool1d_layer(c1, 26, p1, C1_OUT);
+
+//     //-------------------------------------------------------------------------
+//     // Conv block 2: (13,64) → conv → (13,32) → pool → (6,32)
+//     //-------------------------------------------------------------------------
+//     data_t c2[13 * C2_OUT];
+//     data_t p2[6 * C2_OUT];
+
+//     conv1d_layer_tiled(p1, 13, C2_IN, c2, C2_OUT, conv2_w, KERNEL, conv2_b);
+//     maxpool1d_layer(c2, 13, p2, C2_OUT);
+
+//     //-------------------------------------------------------------------------
+//     // Conv block 3: (6,32) → conv → (6,16) → pool → (3,16)
+//     //-------------------------------------------------------------------------
+//     data_t c3[6 * C3_OUT];
+//     data_t p3[3 * C3_OUT];
+
+//     conv1d_layer_tiled(p2, 6, C3_IN, c3, C3_OUT, conv3_w, KERNEL, conv3_b);
+//     maxpool1d_layer(c3, 6, p3, C3_OUT);
+
+//     //-------------------------------------------------------------------------
+//     // Conv block 4: (3,16) → conv → (3,8) → pool → (1,8)
+//     //-------------------------------------------------------------------------
+//     data_t c4[3 * C4_OUT];
+//     data_t p4[1 * C4_OUT];
+
+//     conv1d_layer_tiled(p3, 3, C4_IN, c4, C4_OUT, conv4_w, KERNEL, conv4_b);
+//     maxpool1d_layer(c4, 3, p4, C4_OUT);
+
+//     //-------------------------------------------------------------------------
+//     // Dense layers (tiled weight loading)
+//     //-------------------------------------------------------------------------
+//     data_t d0[D0_OUT], d1[D1_OUT], d2[D2_OUT], d3[D3_OUT];
+
+//     dense_layer_tiled(p4, D0_IN, d0, D0_OUT, dense0_w, dense0_b, true);
+//     dense_layer_tiled(d0, D1_IN, d1, D1_OUT, dense1_w, dense1_b, true);
+//     dense_layer_tiled(d1, D2_IN, d2, D2_OUT, dense2_w, dense2_b, true);
+//     dense_layer_tiled(d2, D3_IN, d3, D3_OUT, dense3_w, dense3_b, false);
+
+//     //-------------------------------------------------------------------------
+//     // Return predicted gesture class
+//     //-------------------------------------------------------------------------
+//     return argmax(d3, D3_OUT);
+// }
+
+
+
+
 //=============================================================================
-// Project:     EE6900 FPGA Accelerator Design - Group 1
+// Project:     EE6900 FPGA Accelerator Design - Group 1 (resource optimized)
 // File:        cnn.cpp
 // Description: 1D Convolutional Neural Network (1D-CNN) forward pass for
 //              real-time EMG hand gesture classification.
 //
-//              Tiled implementation: weights are loaded from DRAM into
-//              small reusable BRAM buffers in tiles to fit within the
-//              xc7z020's limited BRAM capacity.
-//
-//              Architecture (matches pretrained Keras model):
-//                - 5x Conv1D layers with ReLU activation
-//                - 5x MaxPool1D layers (pool size 2, stride 2)
-//                - 4x Dense (fully connected) layers
-//                - Final argmax to select predicted gesture class
+//              Single-loop tiled implementation: conv and dense layers each
+//              use ONE hardware instance that is reused across all layers.
+//              Weights are loaded from DRAM in small tiles per layer.
+//              Activations ping-pong between two reusable BRAM buffers.
 //
 //              Input:  Normalized EMG window of shape (52, 10)
 //              Output: Integer gesture class index (0 to 22)
@@ -22,17 +388,15 @@
 
 //-----------------------------------------------------------------------------
 // Tile sizes for weight buffering
-//
-// CONV_TILE: number of output filters processed per tile in conv layers
-//   Largest conv weight tile: KERNEL * C1_IN * CONV_TILE = 3*128*8 = 3072
-//   At 32 bits each = 12 KB per tile — fits easily in BRAM
-//
-// DENSE_TILE: number of output neurons processed per tile in dense layers
-//   Largest dense weight tile: D1_IN * DENSE_TILE = 512*32 = 16384
-//   At 32 bits each = 64 KB per tile — fits in BRAM
 //-----------------------------------------------------------------------------
-#define CONV_TILE   8
-#define DENSE_TILE  32
+#define CONV_TILE   16 //8
+#define DENSE_TILE  64 ///32
+
+//-----------------------------------------------------------------------------
+// Activation buffer size — must hold the largest intermediate tensor
+// Largest is conv0 output: 52 * 128 = 6656 elements
+//-----------------------------------------------------------------------------
+#define ACT_BUF_SIZE  (WINDOW_SIZE * C0_OUT)  // 6656
 
 //-----------------------------------------------------------------------------
 // relu
@@ -45,19 +409,7 @@ static inline data_t relu(data_t x) {
 // conv1d_layer_tiled
 //
 // Tiled 1D convolution: processes CONV_TILE output filters at a time.
-// For each tile, loads weights from DRAM into a local BRAM buffer,
-// computes the convolution for those filters, and writes final results
-// (with ReLU) directly to the output activation buffer.
-//
-// Parameters:
-//   input       — flattened input activations [in_time x in_ch] (BRAM)
-//   in_time     — number of time steps
-//   in_ch       — number of input channels
-//   output      — flattened output activations [in_time x out_ch] (BRAM)
-//   out_ch      — total number of output filters
-//   kernel      — full weight array [kernel_size x in_ch x out_ch] (DRAM)
-//   kernel_size — convolution kernel size
-//   bias        — bias array [out_ch] (DRAM)
+// Single hardware instance reused for all 5 conv layers.
 //-----------------------------------------------------------------------------
 void conv1d_layer_tiled(
     data_t input[], int in_time, int in_ch,
@@ -67,48 +419,52 @@ void conv1d_layer_tiled(
 ) {
     #pragma HLS INLINE off
 
+    
+
     // Local BRAM buffers for one tile of weights
-    // Sized for the largest conv layer: 3 * 128 * CONV_TILE = 3072
-    weight_t w_buf[KERNEL * C1_IN * CONV_TILE];
+    weight_t w_buf[KERNEL * C1_IN * CONV_TILE];  // 3*128*8 = 3072
     weight_t b_buf[CONV_TILE];
 
-    // Iterate over output filter groups
+    #pragma HLS ARRAY_PARTITION variable=w_buf cyclic factor=4
+
     CONV_TILE_LOOP:
     for (int fg = 0; fg < out_ch; fg += CONV_TILE) {
+         #pragma HLS LOOP_TRIPCOUNT min=1 max=8//16  // max: 128/8 = 16
 
-        // Determine how many filters in this tile
         int tile_size = (fg + CONV_TILE <= out_ch) ? CONV_TILE : (out_ch - fg);
 
-        //---------------------------------------------------------------------
         // Load weight tile from DRAM into BRAM
-        // Remap from full kernel layout [k][in_ch][out_ch]
-        // to tile layout [k][in_ch][CONV_TILE]
-        //---------------------------------------------------------------------
         LOAD_CONV_W:
         for (int k = 0; k < kernel_size; k++) {
+            //HLS LOOP_TRIPCOUNT to tell the compiler how many iterations are in loop at compile time
+            //This helps with latency count when iteration is a parameter and unknown at compile time
+             #pragma HLS LOOP_TRIPCOUNT min=3 max=3    // k
             for (int c = 0; c < in_ch; c++) {
+                 #pragma HLS LOOP_TRIPCOUNT min=10 max=128 // c
                 for (int f = 0; f < tile_size; f++) {
-                    #pragma HLS PIPELINE
+                     #pragma HLS PIPELINE
+                     #pragma HLS LOOP_TRIPCOUNT min=8 max=8    // f
+                    
                     w_buf[k * in_ch * CONV_TILE + c * CONV_TILE + f] =
                         kernel[k * in_ch * out_ch + c * out_ch + fg + f];
                 }
             }
         }
 
-        // Load bias tile
         LOAD_CONV_B:
         for (int f = 0; f < tile_size; f++) {
+            #pragma HLS LOOP_TRIPCOUNT min=16 max=16 // 8 8
             #pragma HLS PIPELINE
             b_buf[f] = bias[fg + f];
         }
 
-        //---------------------------------------------------------------------
-        // Compute convolution for this tile of filters
-        //---------------------------------------------------------------------
+        // Compute convolution for this tile
         CONV_TIME:
         for (int t = 0; t < in_time; t++) {
+            #pragma HLS LOOP_TRIPCOUNT min=3 max=52
             CONV_FILTER:
             for (int f = 0; f < tile_size; f++) {
+                #pragma HLS LOOP_TRIPCOUNT min=16 max=16 // 8 8
                 #pragma HLS PIPELINE
 
                 acc_t acc = (acc_t)b_buf[f];
@@ -120,13 +476,15 @@ void conv1d_layer_tiled(
                     if (t_in >= 0 && t_in < in_time) {
                         CONV_CHANNEL:
                         for (int c = 0; c < in_ch; c++) {
+                             #pragma HLS LOOP_TRIPCOUNT min=10 max=128
+                              #pragma HLS UNROLL factor=4
+                             
                             acc += (acc_t)input[t_in * in_ch + c] *
                                    (acc_t)w_buf[k * in_ch * CONV_TILE + c * CONV_TILE + f];
                         }
                     }
                 }
 
-                // Write final result with ReLU directly to output
                 output[t * out_ch + fg + f] = relu((data_t)acc);
             }
         }
@@ -137,6 +495,7 @@ void conv1d_layer_tiled(
 // maxpool1d_layer
 //
 // 1D max pooling with pool size 2 and stride 2.
+// Single hardware instance reused for all 5 pool layers.
 //-----------------------------------------------------------------------------
 void maxpool1d_layer(
     data_t input[], int in_time,
@@ -148,8 +507,11 @@ void maxpool1d_layer(
 
     MAXPOOL:
     for (int t = 0; t < out_time; t++) {
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=26
+
         MAXPOOL_CALC:
         for (int c = 0; c < ch; c++) {
+            #pragma HLS LOOP_TRIPCOUNT min=8 max=128
             #pragma HLS PIPELINE
 
             data_t a = input[(t*2)   * ch + c];
@@ -164,18 +526,7 @@ void maxpool1d_layer(
 // dense_layer_tiled
 //
 // Tiled dense layer: processes DENSE_TILE output neurons at a time.
-// For each tile, loads weights from DRAM into a local BRAM buffer,
-// computes the full dot product for those neurons, applies ReLU if
-// requested, and writes final results to the output array.
-//
-// Parameters:
-//   input      — input activations [in_size] (BRAM)
-//   in_size    — number of input neurons
-//   output     — output activations [out_size] (BRAM)
-//   out_size   — total number of output neurons
-//   weights    — full weight matrix [in_size x out_size] (DRAM)
-//   bias       — bias array [out_size] (DRAM)
-//   apply_relu — apply ReLU activation after linear transform
+// Single hardware instance reused for all 4 dense layers.
 //-----------------------------------------------------------------------------
 void dense_layer_tiled(
     data_t input[], int in_size,
@@ -186,51 +537,47 @@ void dense_layer_tiled(
     #pragma HLS INLINE off
 
     // Local BRAM buffers for one tile of weights
-    // Sized for the largest dense layer: D1_IN * DENSE_TILE = 512*32 = 16384
-    weight_t w_buf[D1_IN * DENSE_TILE];
+    weight_t w_buf[D1_IN * DENSE_TILE];  // 512*32 = 16384
     weight_t b_buf[DENSE_TILE];
 
-    // Iterate over output neuron groups
     DENSE_TILE_LOOP:
     for (int og = 0; og < out_size; og += DENSE_TILE) {
-
-        // Determine how many neurons in this tile
+         #pragma HLS LOOP_TRIPCOUNT min=1 max=8//16  // max: 512/32 = 16 (dense0)
         int tile_size = (og + DENSE_TILE <= out_size) ? DENSE_TILE : (out_size - og);
 
-        //---------------------------------------------------------------------
         // Load weight tile from DRAM into BRAM
-        // Remap from [in_size x out_size] to [in_size x DENSE_TILE]
-        //---------------------------------------------------------------------
         LOAD_DENSE_W:
         for (int i = 0; i < in_size; i++) {
+            #pragma HLS LOOP_TRIPCOUNT min=8 max=512 
             for (int o = 0; o < tile_size; o++) {
-                #pragma HLS PIPELINE
+                #pragma HLS PIPELINE //no II parameter lets the compiler choose the best option
+                #pragma HLS LOOP_TRIPCOUNT min=8 max=512  // D0_IN to D1_IN
                 w_buf[i * DENSE_TILE + o] = weights[i * out_size + og + o];
             }
         }
 
-        // Load bias tile
         LOAD_DENSE_B:
         for (int o = 0; o < tile_size; o++) {
             #pragma HLS PIPELINE
+             #pragma HLS LOOP_TRIPCOUNT min=23 max=64//32
             b_buf[o] = bias[og + o];
         }
 
-        //---------------------------------------------------------------------
-        // Compute dot product for this tile of output neurons
-        //---------------------------------------------------------------------
+        // Compute dot product for this tile
         DENSE_COMPUTE:
         for (int o = 0; o < tile_size; o++) {
+
+            #pragma HLS LOOP_TRIPCOUNT min=23 max=64//32
             #pragma HLS PIPELINE
 
             acc_t acc = (acc_t)b_buf[o];
 
             DENSE_DOT:
             for (int i = 0; i < in_size; i++) {
+                #pragma HLS LOOP_TRIPCOUNT min=8 max=512
                 acc += (acc_t)input[i] * (acc_t)w_buf[i * DENSE_TILE + o];
             }
 
-            // Write final result to correct position in output
             output[og + o] = apply_relu ? relu((data_t)acc) : (data_t)acc;
         }
     }
@@ -259,24 +606,27 @@ int argmax(data_t input[], int size) {
 //-----------------------------------------------------------------------------
 // cnn_forward
 //
-// Full 1D-CNN forward pass using tiled weight loading.
-// Weights are loaded from DRAM in small tiles — no need to buffer
-// all weights in BRAM simultaneously.
+// Full 1D-CNN forward pass using a single loop for conv layers and
+// a single loop for dense layers. This ensures HLS creates only ONE
+// hardware instance of conv1d_layer_tiled and ONE of dense_layer_tiled,
+// reused across all layers via time-sharing.
 //
-// Activation buffers between layers remain fully on-chip in BRAM.
+// Activations ping-pong between buf_a and buf_b:
+//   - Conv reads from buf_a, writes to buf_b
+//   - Pool reads from buf_b, writes back to buf_a
+//   - Next layer repeats
 //
 // Data flow:
-//   Input (52,10) → flatten → 520
-//   Conv0+Pool0: (52,10)  → (52,128)  → (26,128)
-//   Conv1+Pool1: (26,128) → (26,64)   → (13,64)
-//   Conv2+Pool2: (13,64)  → (13,32)   → (6,32)
-//   Conv3+Pool3: (6,32)   → (6,16)    → (3,16)
-//   Conv4+Pool4: (3,16)   → (3,8)     → (1,8)
-//   Dense0: 8   → 512
-//   Dense1: 512 → 256
-//   Dense2: 256 → 128
-//   Dense3: 128 → 23
-//   Argmax: 23  → 1
+//   Input (52,10) → flatten into buf_a
+//   Conv0: buf_a → buf_b    Pool0: buf_b → buf_a
+//   Conv1: buf_a → buf_b    Pool1: buf_b → buf_a
+//   Conv2: buf_a → buf_b    Pool2: buf_b → buf_a
+//   Conv3: buf_a → buf_b    Pool3: buf_b → buf_a
+//   Conv4: buf_a → buf_b    Pool4: buf_b → buf_a
+//   Dense0: buf_a → buf_b
+//   Dense1: buf_b → buf_a
+//   Dense2: buf_a → buf_b
+//   Dense3: buf_b → buf_a   (or buf_b, doesn't matter — argmax reads it)
 //-----------------------------------------------------------------------------
 int cnn_forward(
     data_t input[WINDOW_SIZE][N_CHANNELS],
@@ -291,75 +641,109 @@ int cnn_forward(
     weight_t dense3_w[], weight_t dense3_b[]
 ) {
     //-------------------------------------------------------------------------
-    // Flatten 2D input into 1D
+    // Reusable activation buffers (ping-pong)
+    // Sized for the largest intermediate tensor: 52 * 128 = 6656
     //-------------------------------------------------------------------------
-    data_t flat[WINDOW_SIZE * N_CHANNELS];
+    data_t buf_a[ACT_BUF_SIZE];
+    data_t buf_b[ACT_BUF_SIZE];
+    #pragma HLS ARRAY_PARTITION variable=buf_a cyclic factor=4
+    #pragma HLS ARRAY_PARTITION variable=buf_b cyclic factor=4
 
+    //-------------------------------------------------------------------------
+    // Conv layer configuration tables
+    //-------------------------------------------------------------------------
+    const int conv_in_time[5]  = {52, 26, 13, 6, 3};
+    const int conv_in_ch[5]    = {C0_IN, C1_IN, C2_IN, C3_IN, C4_IN};
+    const int conv_out_ch[5]   = {C0_OUT, C1_OUT, C2_OUT, C3_OUT, C4_OUT};
+
+    //-------------------------------------------------------------------------
+    // Dense layer configuration tables
+    //-------------------------------------------------------------------------
+    const int dense_in_size[4]  = {D0_IN, D1_IN, D2_IN, D3_IN};
+    const int dense_out_size[4] = {D0_OUT, D1_OUT, D2_OUT, D3_OUT};
+
+    //-------------------------------------------------------------------------
+    // Flatten 2D input into buf_a
+    //-------------------------------------------------------------------------
     FLATTEN_INPUT:
     for (int t = 0; t < WINDOW_SIZE; t++) {
         for (int c = 0; c < N_CHANNELS; c++) {
             #pragma HLS PIPELINE
-            flat[t * N_CHANNELS + c] = input[t][c];
+            buf_a[t * N_CHANNELS + c] = input[t][c];
         }
     }
 
     //-------------------------------------------------------------------------
-    // Conv block 0: (52,10) → conv → (52,128) → pool → (26,128)
+    // Conv + Pool layers: single loop, one hardware instance each
+    // Conv reads buf_a → writes buf_b
+    // Pool reads buf_b → writes buf_a
     //-------------------------------------------------------------------------
-    data_t c0[WINDOW_SIZE * C0_OUT];
-    data_t p0[26 * C0_OUT];
+    CONV_LAYERS:
+    for (int layer = 0; layer < 5; layer++) {
 
-    conv1d_layer_tiled(flat, WINDOW_SIZE, C0_IN, c0, C0_OUT, conv0_w, KERNEL, conv0_b);
-    maxpool1d_layer(c0, WINDOW_SIZE, p0, C0_OUT);
+        #pragma HLS LOOP_TRIPCOUNT min=5 max=5
+        // Select weight pointers for this layer via switch
+        weight_t* w;
+        weight_t* b;
 
-    //-------------------------------------------------------------------------
-    // Conv block 1: (26,128) → conv → (26,64) → pool → (13,64)
-    //-------------------------------------------------------------------------
-    data_t c1[26 * C1_OUT];
-    data_t p1[13 * C1_OUT];
+        //Loop that keeps calculations within the same hardware block to help with resources
+        switch (layer) {
+            case 0: w = conv0_w; b = conv0_b; break;
+            case 1: w = conv1_w; b = conv1_b; break;
+            case 2: w = conv2_w; b = conv2_b; break;
+            case 3: w = conv3_w; b = conv3_b; break;
+            case 4: w = conv4_w; b = conv4_b; break;
+        }
 
-    conv1d_layer_tiled(p0, 26, C1_IN, c1, C1_OUT, conv1_w, KERNEL, conv1_b);
-    maxpool1d_layer(c1, 26, p1, C1_OUT);
+        // Conv: buf_a → buf_b
+        conv1d_layer_tiled(buf_a, conv_in_time[layer], conv_in_ch[layer],
+                           buf_b, conv_out_ch[layer],
+                           w, KERNEL, b);
 
-    //-------------------------------------------------------------------------
-    // Conv block 2: (13,64) → conv → (13,32) → pool → (6,32)
-    //-------------------------------------------------------------------------
-    data_t c2[13 * C2_OUT];
-    data_t p2[6 * C2_OUT];
-
-    conv1d_layer_tiled(p1, 13, C2_IN, c2, C2_OUT, conv2_w, KERNEL, conv2_b);
-    maxpool1d_layer(c2, 13, p2, C2_OUT);
-
-    //-------------------------------------------------------------------------
-    // Conv block 3: (6,32) → conv → (6,16) → pool → (3,16)
-    //-------------------------------------------------------------------------
-    data_t c3[6 * C3_OUT];
-    data_t p3[3 * C3_OUT];
-
-    conv1d_layer_tiled(p2, 6, C3_IN, c3, C3_OUT, conv3_w, KERNEL, conv3_b);
-    maxpool1d_layer(c3, 6, p3, C3_OUT);
+        // Pool: buf_b → buf_a (halves the time dimension)
+        maxpool1d_layer(buf_b, conv_in_time[layer], buf_a, conv_out_ch[layer]);
+    }
 
     //-------------------------------------------------------------------------
-    // Conv block 4: (3,16) → conv → (3,8) → pool → (1,8)
+    // Dense layers: single loop, one hardware instance
+    // Alternates read/write between buf_a and buf_b
+    //   Dense0: buf_a → buf_b   (ReLU)
+    //   Dense1: buf_b → buf_a   (ReLU)
+    //   Dense2: buf_a → buf_b   (ReLU)
+    //   Dense3: buf_b → buf_a   (no ReLU — raw logits)
     //-------------------------------------------------------------------------
-    data_t c4[3 * C4_OUT];
-    data_t p4[1 * C4_OUT];
+    DENSE_LAYERS:
+    for (int layer = 0; layer < 4; layer++) {
 
-    conv1d_layer_tiled(p3, 3, C4_IN, c4, C4_OUT, conv4_w, KERNEL, conv4_b);
-    maxpool1d_layer(c4, 3, p4, C4_OUT);
+        weight_t* w;
+        weight_t* b;
+
+        switch (layer) {
+            case 0: w = dense0_w; b = dense0_b; break;
+            case 1: w = dense1_w; b = dense1_b; break;
+            case 2: w = dense2_w; b = dense2_b; break;
+            case 3: w = dense3_w; b = dense3_b; break;
+        }
+
+        bool use_relu = (layer < 3);
+
+        // Even layers: buf_a → buf_b
+        // Odd layers:  buf_b → buf_a
+        if (layer % 2 == 0) {
+            dense_layer_tiled(buf_a, dense_in_size[layer],
+                              buf_b, dense_out_size[layer],
+                              w, b, use_relu);
+        } else {
+            dense_layer_tiled(buf_b, dense_in_size[layer],
+                              buf_a, dense_out_size[layer],
+                              w, b, use_relu);
+        }
+    }
 
     //-------------------------------------------------------------------------
-    // Dense layers (tiled weight loading)
+    // Argmax — after 4 dense layers (even count), final result is in buf_a
+    // Dense0: a→b, Dense1: b→a, Dense2: a→b, Dense3: b→a
+    // So buf_a has the 23 logits
     //-------------------------------------------------------------------------
-    data_t d0[D0_OUT], d1[D1_OUT], d2[D2_OUT], d3[D3_OUT];
-
-    dense_layer_tiled(p4, D0_IN, d0, D0_OUT, dense0_w, dense0_b, true);
-    dense_layer_tiled(d0, D1_IN, d1, D1_OUT, dense1_w, dense1_b, true);
-    dense_layer_tiled(d1, D2_IN, d2, D2_OUT, dense2_w, dense2_b, true);
-    dense_layer_tiled(d2, D3_IN, d3, D3_OUT, dense3_w, dense3_b, false);
-
-    //-------------------------------------------------------------------------
-    // Return predicted gesture class
-    //-------------------------------------------------------------------------
-    return argmax(d3, D3_OUT);
+    return argmax(buf_a, D3_OUT);
 }
