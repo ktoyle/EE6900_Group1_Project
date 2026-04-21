@@ -86,7 +86,6 @@ const data_t hpf_coeffs[N_TAPS] = {
 };
 
 
-
 //---------------------------------------------------------------------------
 // Notch Filter coefficents
 // Filter out 60Hz 
@@ -109,6 +108,7 @@ const data_t notch_coeffs[N_TAPS] = {
 //----------------------------------------------------------------------------
 data_t fir_lpf(data_t input, int ch) {
 
+    //Inline to create hardware copy when calling the function
     #pragma HLS INLINE
 
     static data_t shift_reg[N_CHANNELS][N_TAPS] = {0};
@@ -262,7 +262,13 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 weight_t dense0_w[], weight_t dense0_b[],
                 weight_t dense1_w[], weight_t dense1_b[],
                 weight_t dense2_w[], weight_t dense2_b[],
-                weight_t dense3_w[], weight_t dense3_b[]) {
+                weight_t dense3_w[], weight_t dense3_b[]
+                
+                #ifdef CSIM_DEBUG
+                , float debug_logits [N_CLASSES]
+                #endif
+            
+                ) {
 
     //-------------------------------------------------------------------------
     // HLS Interface Pragmas
@@ -288,6 +294,8 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
     #pragma HLS INTERFACE m_axi depth=2944   port=dense3_w bundle=weights
     #pragma HLS INTERFACE m_axi depth=23     port=dense3_b bundle=weights
     #pragma HLS INTERFACE s_axilite port=return
+
+    
 
     // Partition emg_buffer along channel dimension
     #pragma HLS ARRAY_PARTITION variable=emg_buffer complete dim=2 
@@ -332,7 +340,11 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                                   dense0_w, dense0_b,
                                   dense1_w, dense1_b,
                                   dense2_w, dense2_b,
-                                  dense3_w, dense3_b);
+                                  dense3_w, dense3_b
+                                  #ifdef CSIM_DEBUG
+                                    , debug_logits
+                                  #endif
+                                  );
 
         // Write the predicted gesture index to the output stream                         
         out_stream.write(gesture);

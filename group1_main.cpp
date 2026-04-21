@@ -1,56 +1,58 @@
 //=============================================================================
 // Project:     EE6900 FPGA Accelerator Design - Group 1
 // File:        group1_main.cpp
-// Description: C simulation testbench for the EMG signal processing pipeline.
+// Description: Testbench for the real-time EMG inference pipeline.
 //
-//              This file is NOT synthesized to hardware. It is only used
-//              during Vitis HLS C simulation (csim) to verify that the
-//              design logic in group1_top.cpp and cnn.cpp is functionally
-//              correct before synthesis.
+//              This testbench provides the verification environment for the 
+//              `group1_top` HLS module. It simulates the hardware streaming 
+//              interface and validates the end-to-end classification accuracy 
+//              using pre-recorded NinaPro DB1 sensor data.
 //
-//              The testbench performs the following:
-//                1. Loads pretrained CNN weights from .bin files into
-//                   float arrays (same approach as the ResNet reference design)
-//                2. Generates a synthetic test signal containing three
-//                   frequency components:
-//                     - 50Hz  (in-band, should pass through filters)
-//                     - 600Hz (above LPF cutoff, should be removed)
-//                     - 60Hz  (power line noise, should be removed by notch)
-//                3. Feeds the signal into group1_top one time step at a time,
-//                   simulating a real-time 1kHz EMG stream across 10 channels
-//                4. Prints the predicted gesture class for each completed
-//                   52-sample window
+// Operations performed:
+//   1. Weight Initialization: Loads pretrained CNN weights and biases from 
+//      binary files into global buffers for hardware simulation.
+//   2. Data Ingestion: Parses the NinaPro CSV dataset, filtering out noise 
+//      and rest-state samples to generate valid input windows.
+//   3. Hardware Streaming: Simulates a 1kHz real-time stream by feeding 
+//      normalized EMG samples into the `hls::stream` interface of the 
+//      accelerator design.
+//   4. Inference & Verification: Executes the 1D-CNN forward pass, calculates 
+//      class probabilities via softmax, and performs ground-truth comparison 
+//      to report system accuracy and confidence levels.
 //
-//              Expected output: 9 windows completed (500 samples / 52 = 9)
-//              Gesture outputs will all be 0 for the synthetic signal since
-//              the model has never seen sine wave data. To properly validate
-//              the CNN, real NinaPro EMG data should be used as input.
-//
-// Tool:        Vitis HLS 2024.1 (csim only)
+// Notes: 
+//   - Requires weights/ directory and Ninapro_DB1_small.csv in the 
+//     working directory.
+//   - Uses CSIM_DEBUG macro to toggle diagnostic logit output.
 //=============================================================================
+
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 #include <cmath>
 #include "hls_stream.h"
 #include "cnn.h"
+#include <cstdlib>  
 
 //--------------------------------------------------------------------------
 // Testbench Configuration
-// N_SAMPLES: total number of time steps to simulate
-//            500 samples at 1kHz = 0.5 seconds of signal
-//            produces 9 complete 52-sample windows (500 / 52 = 9)
 //--------------------------------------------------------------------------
+#define CSV_PATH       "Ninapro_DB1_small.csv"
+#define N_SAMPLES      52
+#define N_CHANNELS     10
+#define EMG_FIRST_COL  1
+#define EMG_LAST_COL   10
+#define LABEL_COL      35   // restimulus
 
-#define N_SAMPLES   52
-#define PI          3.14159265358979f
-#define N_CHANNELS  10
+// Update this to the full path to your project folder
+const char* weight_base_path = "C:/Users/kevto/Documents/School/Masters/Spring2026/EE6900_FPGA_Accel_Design/project_workspace/ee6900_group1_project/weights/";
 
-
-//--------------------------------------------------------------------------
-// Forward declaration of top level function
-// Must match the signature in group1_top.cpp exactly
-//--------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+// Forward declaration — must match group1_top.cpp exactly
+//-----------------------------------------------------------------------------
 void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 hls::stream<int>   &out_stream,
                 weight_t conv0_w[], weight_t conv0_b[],
@@ -61,15 +63,33 @@ void group1_top(hls::stream<float> in_stream[N_CHANNELS],
                 weight_t dense0_w[], weight_t dense0_b[],
                 weight_t dense1_w[], weight_t dense1_b[],
                 weight_t dense2_w[], weight_t dense2_b[],
-                weight_t dense3_w[], weight_t dense3_b[]);
+                weight_t dense3_w[], weight_t dense3_b[]
+                #ifdef CSIM_DEBUG
+                    , float debug_logits[N_CLASSES]
+                #endif
+                );
 
-//--------------------------------------------------------------------------
-// CNN Weight Arrays
-// Sized to match the pretrained Keras model architecture exactly:
-//   Conv layers:  (kernel x in_ch x out_ch) flattened
-//   Dense layers: (in_size x out_size) flattened
-// All weights are float32 to match the .bin file format
-//--------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+// softmax activation
+//-----------------------------------------------------------------------------
+void softmax(const float logits[N_CLASSES], float probs[N_CLASSES]) {
+    float max_logit = logits[0];
+    for (int i = 1; i < N_CLASSES; i++) {
+        if (logits[i] > max_logit) max_logit = logits[i];
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < N_CLASSES; i++) {
+        probs[i] = std::exp(logits[i] - max_logit);
+        sum += probs[i];
+    }
+    for (int i = 0; i < N_CLASSES; i++) {
+        probs[i] /= sum;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Weight arrays
+//-----------------------------------------------------------------------------
 weight_t conv0_w[3*10*128],  conv0_b[128];
 weight_t conv1_w[3*128*64],  conv1_b[64];
 weight_t conv2_w[3*64*32],   conv2_b[32];
@@ -80,99 +100,194 @@ weight_t dense1_w[512*256],  dense1_b[256];
 weight_t dense2_w[256*128],  dense2_b[128];
 weight_t dense3_w[128*23],   dense3_b[23];
 
-//-----------------------------------------------------------------------------
-// load_weights
-//
-// Reads raw float32 binary data from a file into a float array.
-// The .bin files are saved by the Python training script using
-// numpy's tofile() which writes raw float32 bytes with no header.
-//
-// Parameters:
-//   path — path to the .bin weight file
-//   buf  — destination float array to load weights into
-//   n    — number of float values to read
-//-----------------------------------------------------------------------------
-void load_weights(const char* path, weight_t* buf, int n) {
-    std::ifstream f(path, std::ios::binary);
+
+// Function that loads weights from the path
+void load_weights(const char* filename, weight_t* buf, int n) {
+
+    // Combine the base path and the filename
+    std::string full_path = std::string(weight_base_path) + std::string(filename);
+    
+    std::ifstream f(full_path, std::ios::binary);
+
+    if (!f.is_open()) {
+        std::cerr << "ERROR: Could not open weight file: " << full_path << std::endl;
+        exit(1); 
+    }
+    
     f.read((char*)buf, n * sizeof(float));
+
+    if (f.gcount() != n * sizeof(float)) {
+        std::cerr << "ERROR: Failed to read expected amount of data from: " << full_path 
+                  << " (Read " << f.gcount() << " bytes, expected " << n * sizeof(float) << ")" << std::endl;
+        exit(1);
+    }
     f.close();
 }
 
-//-----------------------------------------------------------------------------
-// read_bin_files
-//
-// Loads all pretrained CNN weights and biases from .bin files into the
-// global float arrays declared above. Must be called before any inference.
-//
-// The weights were exported from the trained Keras model using:
-//   layer.get_weights()[0].astype(np.float32).tofile('weights/name.bin')
-//
-// File naming convention matches Keras layer names:
-//   conv1d_weights.bin    = first Conv1D layer weights
-//   conv1d_1_weights.bin  = second Conv1D layer weights
-//   dense_weights.bin     = first Dense layer weights
-//   etc.
-//-----------------------------------------------------------------------------
+
 void read_bin_files() {
 
-    // Load all 5 convolutional layer weights and biases
-    load_weights("weights/conv1d_weights.bin",   conv0_w, 3*10*128);
-    load_weights("weights/conv1d_bias.bin",      conv0_b, 128);
-    load_weights("weights/conv1d_1_weights.bin", conv1_w, 3*128*64);
-    load_weights("weights/conv1d_1_bias.bin",    conv1_b, 64);
-    load_weights("weights/conv1d_2_weights.bin", conv2_w, 3*64*32);
-    load_weights("weights/conv1d_2_bias.bin",    conv2_b, 32);
-    load_weights("weights/conv1d_3_weights.bin", conv3_w, 3*32*16);
-    load_weights("weights/conv1d_3_bias.bin",    conv3_b, 16);
-    load_weights("weights/conv1d_4_weights.bin", conv4_w, 3*16*8);
-    load_weights("weights/conv1d_4_bias.bin",    conv4_b, 8);
-
-    // Load all 4 dense layer weights and biases
-    load_weights("weights/dense_weights.bin",    dense0_w, 8*512);
-    load_weights("weights/dense_bias.bin",       dense0_b, 512);
-    load_weights("weights/dense_1_weights.bin",  dense1_w, 512*256);
-    load_weights("weights/dense_1_bias.bin",     dense1_b, 256);
-    load_weights("weights/dense_2_weights.bin",  dense2_w, 256*128);
-    load_weights("weights/dense_2_bias.bin",     dense2_b, 128);
-    load_weights("weights/dense_3_weights.bin",  dense3_w, 128*23);
-    load_weights("weights/dense_3_bias.bin",     dense3_b, 23);
-
+    load_weights("conv1d_weights.bin",   conv0_w, 3*10*128);
+    load_weights("conv1d_bias.bin",      conv0_b, 128);
+    load_weights("conv1d_1_weights.bin", conv1_w, 3*128*64);
+    load_weights("conv1d_1_bias.bin",    conv1_b, 64);
+    load_weights("conv1d_2_weights.bin", conv2_w, 3*64*32);
+    load_weights("conv1d_2_bias.bin",    conv2_b, 32);
+    load_weights("conv1d_3_weights.bin", conv3_w, 3*32*16);
+    load_weights("conv1d_3_bias.bin",    conv3_b, 16);
+    load_weights("conv1d_4_weights.bin", conv4_w, 3*16*8);
+    load_weights("conv1d_4_bias.bin",    conv4_b, 8);
+    load_weights("dense_weights.bin",    dense0_w, 8*512);
+    load_weights("dense_bias.bin",       dense0_b, 512);
+    load_weights("dense_1_weights.bin",  dense1_w, 512*256);
+    load_weights("dense_1_bias.bin",     dense1_b, 256);
+    load_weights("dense_2_weights.bin",  dense2_w, 256*128);
+    load_weights("dense_2_bias.bin",     dense2_b, 128);
+    load_weights("dense_3_weights.bin",  dense3_w, 128*23);
+    load_weights("dense_3_bias.bin",     dense3_b, 23);
     std::cout << "Weights loaded successfully\n";
 }
 
-int main() {
 
-    // Step 1: Load pretrained weights from .bin files
-    read_bin_files();
+//-----------------------------------------------------------------------------
+// CSV row data
+//-----------------------------------------------------------------------------
+struct Row {
+    float emg[N_CHANNELS];
+    int   restimulus;
+};
 
-    // Step 2: Create HLS streams — one input stream per EMG channel
-    // plus one output stream for gesture class predictions
-    hls::stream<float> in_stream[N_CHANNELS];
-    hls::stream<int>   out_stream;
+//-----------------------------------------------------------------------------
+// Helper: try to parse a float. Returns true on success.
+//-----------------------------------------------------------------------------
+static bool try_parse_float(const std::string& s, float& out) {
+    if (s.empty()) return false;
+    const char* start = s.c_str();
+    char* end = nullptr;
+    out = std::strtof(start, &end);
+    // If strtof didn't advance past start, or value is inf/nan, reject
+    return end != start;
+}
 
-    // Sampling rate — determines frequency of the test signal components
-    float fs = 1000.0f;
 
-     // Step 3: Generate synthetic test signal and write to all input streams
-    for (int i = 0; i < N_SAMPLES; i++) {
-        float t = i / fs;
-        for (int ch = 0; ch < N_CHANNELS; ch++) {
-            float signal = std::sin(2 * PI * 50  * t)
-                         + std::sin(2 * PI * 600 * t)
-                         + std::sin(2 * PI * 60  * t);
-            in_stream[ch].write(signal);
+static bool try_parse_int(const std::string& s, int& out) {
+    if (s.empty()) return false;
+    const char* start = s.c_str();
+    char* end = nullptr;
+    long v = std::strtol(start, &end, 10);
+    if (end == start) return false;
+    out = (int)v;
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// load_csv_filtered
+//-----------------------------------------------------------------------------
+std::vector<Row> load_csv_filtered(const char* path) {
+    std::vector<Row> rows;
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "ERROR: could not open CSV: " << path << "\n";
+        return rows;
+    }
+
+    std::string line;
+    // Try to detect and skip a header row
+    if (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string cell;
+        std::getline(ss, cell, ',');
+        float dummy;
+        if (!try_parse_float(cell, dummy)) {
+            // First cell wasn't numeric — row was a header, continue past it
+        } else {
+            // First cell was numeric — row was data, rewind
+            file.clear();
+            file.seekg(0, std::ios::beg);
         }
     }
 
-     // Step 4: Run the filter + CNN pipeline one time step at a time
-    // group1_top is called N_SAMPLES times, accumulating filtered samples
-    // into a 52-sample buffer. Every 52 calls the CNN fires and a gesture
-    // prediction is written to out_stream.
-    int windows_completed = 0;
+    while (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string cell;
+        int col = 0;
+        Row r;
+        r.restimulus = 0;
+        bool valid = true;
 
+        while (std::getline(ss, cell, ',')) {
+            if (col >= EMG_FIRST_COL && col <= EMG_LAST_COL) {
+                float v;
+                if (!try_parse_float(cell, v)) { valid = false; break; }
+                r.emg[col - EMG_FIRST_COL] = v;
+            } else if (col == LABEL_COL) {
+                int v;
+                if (!try_parse_int(cell, v)) { valid = false; break; }
+                r.restimulus = v;
+            }
+            col++;
+        }
 
+        if (valid && r.restimulus > 0) {
+            rows.push_back(r);
+        }
+    }
+    file.close();
+    return rows;
+}
+
+//-----------------------------------------------------------------------------
+// find_pure_window — first 52-sample span where all samples share a label
+//-----------------------------------------------------------------------------
+int find_pure_window(const std::vector<Row>& rows, int start_hint) {
+    int n = (int)rows.size();
+    for (int i = start_hint; i + N_SAMPLES <= n; i++) {
+        int label = rows[i].restimulus;
+        bool pure = true;
+        for (int j = 1; j < N_SAMPLES; j++) {
+            if (rows[i + j].restimulus != label) { pure = false; break; }
+        }
+        if (pure) return i;
+    }
+    return -1;
+}
+
+int main() {
+    // Step 1: Load weights
+    read_bin_files();
+
+    // Step 2: Load CSV, keep only non-rest samples
+    std::cout << "Loading CSV...\n";
+    std::vector<Row> rows = load_csv_filtered(CSV_PATH);
+    std::cout << "Loaded " << rows.size() << " non-rest samples\n";
+    if ((int)rows.size() < N_SAMPLES) {
+        std::cerr << "ERROR: not enough samples — check that "
+                  << CSV_PATH << " is in the csim working directory\n";
+        return 1;
+    }
+
+    // Step 3: Pick a clean 52-sample window
+    int start = find_pure_window(rows, 0);
+    if (start < 0) {
+        std::cerr << "ERROR: no pure 52-sample window found\n";
+        return 1;
+    }
+    int expected_ninapro_label = rows[start].restimulus;
+    std::cout << "Window starts at filtered index " << start << "\n";
+    std::cout << "Expected NinaPro label: " << expected_ninapro_label << "\n";
+
+    // Step 4: Feed the window into the streams
+    hls::stream<float> in_stream[N_CHANNELS];
+    hls::stream<int>   out_stream;
     for (int i = 0; i < N_SAMPLES; i++) {
-        // Process one time step across all 10 channels
+        for (int ch = 0; ch < N_CHANNELS; ch++) {
+            in_stream[ch].write(rows[start + i].emg[ch]);
+        }
+    }
+
+    // Step 5: Run pipeline 52 times — CNN fires on the last call
+    float debug_logits[N_CLASSES] = {0};
+    for (int i = 0; i < N_SAMPLES; i++) {
         group1_top(in_stream, out_stream,
                    conv0_w, conv0_b,
                    conv1_w, conv1_b,
@@ -182,21 +297,51 @@ int main() {
                    dense0_w, dense0_b,
                    dense1_w, dense1_b,
                    dense2_w, dense2_b,
-                   dense3_w, dense3_b);
-
-        // Check if a complete window was processed and a prediction was made
-        // out_stream only has data when buffer_count hits WINDOW_SIZE (52)
-        if (!out_stream.empty()) {
-            int gesture = out_stream.read();
-            windows_completed++;
-
-            // Print window number and predicted gesture class (0-22)
-            std::cout << "Window " << windows_completed
-                      << " Gesture: " << gesture << "\n";
-        }
+                   dense3_w, dense3_b
+                    #ifdef CSIM_DEBUG
+                        , debug_logits
+                    #endif
+                   );
     }
 
-     // Summary: should print 9 (500 samples / 52 samples per window = 9)
-    std::cout << "\nTotal windows: " << windows_completed << "\n";
+    // Step 6: Read prediction
+    if (out_stream.empty()) {
+        std::cerr << "ERROR: no prediction produced\n";
+        return 1;
+    }
+    int predicted_class = out_stream.read();
+    int predicted_ninapro_label = predicted_class + 1;
+
+    // Step 7: Diagnostic — print raw logits
+    std::cout << "\nRaw logits: ";
+    for (int i = 0; i < N_CLASSES; i++) {
+        std::cout << debug_logits[i] << " ";
+    }
+    std::cout << "\n";
+
+    // Step 8: Softmax + reporting
+    float probs[N_CLASSES];
+    softmax(debug_logits, probs);
+    float confidence = probs[predicted_class] * 100.0f;
+
+    std::cout << "\nModel output class: " << predicted_class << "\n";
+    std::cout << "Predicted NinaPro label: " << predicted_ninapro_label << "\n";
+    std::cout << "Confidence: " << confidence << "%\n";
+    std::cout << "Expected NinaPro label:  " << expected_ninapro_label << "\n";
+    std::cout << (predicted_ninapro_label == expected_ninapro_label
+                  ? "MATCH" : "MISMATCH") << "\n";
+
+    std::cout << "\nTop 3 predictions:\n";
+    for (int rank = 0; rank < 3; rank++) {
+        int best = 0;
+        for (int i = 1; i < N_CLASSES; i++) {
+            if (probs[i] > probs[best]) best = i;
+        }
+        std::cout << "  " << (rank + 1) << ". class " << best
+                  << " (NinaPro " << (best + 1) << "): "
+                  << (probs[best] * 100.0f) << "%\n";
+        probs[best] = -1.0f;
+    }
+
     return 0;
 }
