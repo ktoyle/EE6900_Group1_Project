@@ -54,10 +54,12 @@ void conv1d_layer_tiled(
 
     // Local BRAM buffers for one tile of weights
     weight_t b_buf[CONV_TILE];
-    weight_t w_buf[KERNEL][C1_IN][CONV_TILE];
+        weight_t w_buf[KERNEL][C1_IN][CONV_TILE];
 
+    #pragma HLS ARRAY_PARTITION variable=w_buf complete dim=1 
     #pragma HLS ARRAY_PARTITION variable=w_buf cyclic factor=16 dim=2
     #pragma HLS ARRAY_PARTITION variable=w_buf complete dim=3
+    #pragma HLS ARRAY_PARTITION variable=input cyclic factor=16 dim=1
 
     CONV_TILE_LOOP:
     for (int fg = 0; fg < out_ch; fg += CONV_TILE) {
@@ -76,7 +78,7 @@ void conv1d_layer_tiled(
 
             for (int c = 0; c < in_ch; c++) {
 
-                 #pragma HLS PIPELINE II=1 
+                 #pragma HLS PIPELINE
                  #pragma HLS LOOP_TRIPCOUNT min=10 max=128 // c
                  
                 for (int f = 0; f < tile_size; f++) {
@@ -94,7 +96,7 @@ void conv1d_layer_tiled(
         for (int f = 0; f < tile_size; f++) {
 
             #pragma HLS PIPELINE
-            #pragma HLS LOOP_TRIPCOUNT min=16 max=16 // 8 8
+            #pragma HLS LOOP_TRIPCOUNT min=16 max=16 
             
             b_buf[f] = bias[fg + f];
         }
@@ -107,13 +109,14 @@ void conv1d_layer_tiled(
             CONV_FILTER:
             for (int f = 0; f < tile_size; f++) {
                 #pragma HLS LOOP_TRIPCOUNT min=16 max=16
-
+                // #pragma HLS PIPELINE 
                 acc_t acc = (acc_t)b_buf[f];
 
                 CONV_CHANNEL:
                 for (int c = 0; c < in_ch; c++) {
                     #pragma HLS LOOP_TRIPCOUNT min=10 max=128
-                    #pragma HLS PIPELINE II=1
+                    #pragma HLS PIPELINE II=2
+                   // #pragma HLS DEPENDENCE variable=input inter false
 
                     CONV_KERNEL:
                     for (int k = 0; k < kernel_size; k++) {
@@ -184,7 +187,7 @@ void dense_layer_tiled(
 
     DENSE_TILE_LOOP:
     for (int og = 0; og < out_size; og += DENSE_TILE) {
-         #pragma HLS LOOP_TRIPCOUNT min=1 max=8//16  // max: 512/32 = 16 (dense0)
+         #pragma HLS LOOP_TRIPCOUNT min=1 max=8
         int tile_size = (og + DENSE_TILE <= out_size) ? DENSE_TILE : (out_size - og);
 
         // Load weight tile from DRAM into BRAM
